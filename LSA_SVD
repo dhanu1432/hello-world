@@ -1,0 +1,267 @@
+
+
+package com.example.demo.docs;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class EmbedController {
+    @Autowired
+    DocumentRetrievalService documentRetrievalService;
+
+    @PostMapping("/train")
+    public ResponseEntity<?> train(@RequestBody RawDocuments docInfo){
+        documentRetrievalService.train(docInfo.getRawDocs(), docInfo.getDocIds());
+        return new ResponseEntity<>("", HttpStatus.OK);
+    }
+}
+
+package com.example.demo.docs;
+
+import org.ejml.simple.SimpleMatrix;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.stream.Collectors;
+
+@Service
+public class DocumentRetrievalService {
+    @Autowired
+    private DocEmbeddingRepository embeddingRepo;
+    private SimpleMatrix docMatrix;
+    private List<String> docIds;
+/*
+Usage
+- Training: Call train() with your document list when the app starts or on a schedule.
+- Retrieval: Use retrieveSimilar() to get top-k document IDs for a query,
+then fetch their content from MongoDB for your LLM.
+*/
+    public void train(List<String> rawDocs, List<String> docIds) {
+        this.docIds = docIds;
+        TfIdfBuilder tfidf = new TfIdfBuilder(rawDocs);
+        double[][] matrix = tfidf.buildMatrix();
+        LsaEmbedder lsa = new LsaEmbedder(matrix, 50); // Adjust k as needed
+        this.docMatrix = lsa.getDocVectors();          // Save to MongoDB
+        for (int i = 0; i < docMatrix.numCols(); i++) {
+            double[] vector = new double[docMatrix.numRows()];
+            for (int j = 0; j < vector.length; j++) {
+                vector[j] = docMatrix.get(j, i);
+            }
+            embeddingRepo.save(new DocEmbedding(null, docIds.get(i), vector));
+        }
+    }
+
+    public List<String> retrieveSimilar(String query, int topK) {
+        TextPreprocessor preprocessor = new TextPreprocessor();
+        List<String> queryWords = preprocessor.preprocess(query);         // Simplified: Project query into LSA space (could refine with term vectors)
+        double[] queryVector = new double[docMatrix.numRows()];         // (Add logic to map query to vector space using trained model)
+        List<Double> similarities = new ArrayList<>();
+        for (int i = 0; i < docMatrix.numCols(); i++) {
+            double[] docVector = new double[docMatrix.numRows()];
+            for (int j = 0; j < docVector.length; j++) {
+                docVector[j] = docMatrix.get(j, i);
+            }
+            similarities.add(cosineSimilarity(queryVector, docVector));
+        }          // Sort and return top-k doc IDs
+        return topKIndices(similarities, topK).stream().map(i -> docIds.get(i)).collect(Collectors.toList());
+    }
+
+    private double cosineSimilarity(double[] v1, double[] v2) {
+        double dot = 0, mag1 = 0, mag2 = 0;
+        for (int i = 0; i < v1.length; i++) {
+            dot += v1[i] * v2[i];
+            mag1 += v1[i] * v1[i];
+            mag2 += v2[i] * v2[i];
+        }
+        return dot / (Math.sqrt(mag1) * Math.sqrt(mag2));
+    }
+
+    private List<Integer> topKIndices(List<Double> values, int k) {
+        return values.stream().sorted(Comparator.reverseOrder()).limit(k).map(values::indexOf).collect(Collectors.toList());
+    }
+}
+
+package com.example.demo.docs;
+
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import org.springframework.data.mongodb.core.mapping.Document;
+
+@Document(collection = "doc_embeddings")
+public class DocEmbedding {
+    private String id;
+
+    public DocEmbedding(String id, String originalDocId, double[] vector) {
+        this.id = id;
+        this.originalDocId = originalDocId;
+        this.vector = vector;
+    }
+
+    public String getId() {
+        return id;
+    }
+
+    public void setId(String id) {
+        this.id = id;
+    }
+
+    public String getOriginalDocId() {
+        return originalDocId;
+    }
+
+    public void setOriginalDocId(String originalDocId) {
+        this.originalDocId = originalDocId;
+    }
+
+    public double[] getVector() {
+        return vector;
+    }
+
+    public void setVector(double[] vector) {
+        this.vector = vector;
+    }
+
+    private String originalDocId;
+    private double[] vector;      // Getters, setters, constructors
+}
+
+
+package com.example.demo.docs;
+
+import org.springframework.data.mongodb.repository.MongoRepository;
+
+import java.util.List;
+
+public interface DocEmbeddingRepository extends MongoRepository<DocEmbedding, String> {
+    List<DocEmbedding> findByOriginalDocId(String originalDocId);
+}
+
+package com.example.demo.docs;
+
+import lombok.Data;
+
+import java.util.List;
+
+public class RawDocuments {
+    public List<String> getRawDocs() {
+        return rawDocs;
+    }
+
+    public void setRawDocs(List<String> rawDocs) {
+        this.rawDocs = rawDocs;
+    }
+
+    public List<String> getDocIds() {
+        return docIds;
+    }
+
+    public void setDocIds(List<String> docIds) {
+        this.docIds = docIds;
+    }
+
+    List<String> rawDocs;
+    List<String> docIds;
+}
+
+package com.example.demo.docs;
+
+import java.util.Arrays;
+import java.util.List;
+import java.util.stream.Collectors;
+
+public class TextPreprocessor {
+    public List<String> preprocess(String text) {
+        return Arrays.stream(text.toLowerCase().replaceAll("[^a-z0-9\\s]", "") // Remove punctuation
+                .split("\\s+")).filter(word -> !word.isEmpty()).collect(Collectors.toList());
+    }
+}
+
+package com.example.demo.docs;
+
+import java.util.*;
+import java.util.stream.Collectors;
+
+public class TfIdfBuilder {
+    private List<List<String>> docs;
+    // Preprocessed documents
+    private Set<String> vocabulary;
+
+    public TfIdfBuilder(List<String> rawDocs) {
+        TextPreprocessor preprocessor = new TextPreprocessor();
+        this.docs = rawDocs.stream().map(preprocessor::preprocess).collect(Collectors.toList());
+        this.vocabulary = new HashSet<>();
+        docs.forEach(doc -> vocabulary.addAll(doc));
+    }
+
+    public double[][] buildMatrix() {
+        int numDocs = docs.size();
+        int numTerms = vocabulary.size();
+        double[][] matrix = new double[numTerms][numDocs];
+        List<String> vocabList = new ArrayList<>(vocabulary);
+        for (int d = 0; d < numDocs; d++) {
+            List<String> doc = docs.get(d);
+            Map<String, Integer> termFreq = new HashMap<>();
+            doc.forEach(word -> termFreq.merge(word, 1, Integer::sum));
+            for (int t = 0; t < numTerms; t++) {
+                String term = vocabList.get(t);
+                double tf = (double) termFreq.getOrDefault(term, 0) / doc.size();
+                double idf = Math.log((double) numDocs / (1 + docs.stream().filter(docWords -> docWords.contains(term)).count()));
+                matrix[t][d] = tf * idf;
+            }
+        }
+        return matrix;
+    }
+}
+
+
+
+package com.example.demo.docs;
+
+import org.ejml.simple.SimpleMatrix;
+import org.ejml.simple.SimpleSVD;
+
+public class LsaEmbedder {
+    private SimpleMatrix docVectors;
+
+    public LsaEmbedder(double[][] termDocMatrix, int k) {
+        // k = reduced dimensions, e.g., 50-100
+        SimpleMatrix matrix = new SimpleMatrix(termDocMatrix);
+        SimpleSVD<SimpleMatrix> svd = matrix.svd();
+        SimpleMatrix U = svd.getU();
+        // Term vectors
+        SimpleMatrix W = svd.getW();
+        // Diagonal matrix of singular values
+        SimpleMatrix V = svd.getV(); // Document vectors
+        // Extract singular values from W and create a kxk diagonal matrix
+        int minDim = Math.min(W.numRows(), W.numCols());
+        double[] singularValues = new double[minDim];
+        for (int i = 0; i < minDim; i++) {
+            singularValues[i] = W.get(i, i);
+            // Get diagonal elements
+        }
+        SimpleMatrix S = new SimpleMatrix(k, k);
+        for (int i = 0; i < k && i < singularValues.length; i++) {
+            S.set(i, i, singularValues[i]);
+            // Set diagonal values
+        }
+        // Reduce to k dimensions
+        SimpleMatrix U_k = U.extractMatrix(0, SimpleMatrix.END, 0, k);
+        SimpleMatrix V_k = V.extractMatrix(0, SimpleMatrix.END, 0, k);
+        this.docVectors = V_k.mult(S); // Document embeddings (V_k * S)
+    }
+
+    public SimpleMatrix getDocVectors() {
+        return docVectors;
+    }
+}
+
+
+
