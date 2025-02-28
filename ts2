@@ -1,0 +1,485 @@
+To address your requirements, I’ll update the code to:
+1. **Read Knowledge Documents**: Add the ability to fetch troubleshooting knowledge from external documents or a vector database as context for the LLM.
+2. **Switch for Steps**: Introduce a configuration switch to either use manually predefined steps (as in the current code) or retrieve dynamic steps from a knowledge document/vector database.
+3. **Context for LLM**: Send the retrieved knowledge as part of the LLM prompt, replacing the reliance on hardcoded steps when using the dynamic mode.
+
+I’ll assume:
+- **Knowledge Docs**: Stored as text files or in a vector database (e.g., a simple in-memory store for this example, but you can swap it for a real vector DB like Pinecone or Faiss).
+- **Vector Database**: A placeholder to retrieve relevant troubleshooting steps based on a query (e.g., “call issues”).
+- **Switch**: A boolean flag (`usePredefinedSteps`) to toggle between predefined steps and dynamic retrieval.
+
+Below is the updated implementation.
+
+---
+
+### Updated Java Implementation
+
+#### 1. Knowledge Service (Placeholder for Docs/Vector DB)
+This service simulates fetching knowledge from documents or a vector database.
+
+```java
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+class KnowledgeService {
+    // Simulated vector database (replace with real vector DB integration)
+    private final Map<String, String> knowledgeBase;
+
+    public KnowledgeService() {
+        knowledgeBase = new HashMap<>();
+        // Sample knowledge documents
+        knowledgeBase.put("call", "Troubleshooting call issues:\n" +
+                "1. Check signal strength - ensure you have sufficient bars.\n" +
+                "2. Restart your phone to reset the network connection.\n" +
+                "3. Verify airplane mode is off.\n" +
+                "4. Ensure the SIM card is inserted correctly.");
+        knowledgeBase.put("text", "Troubleshooting texting issues:\n" +
+                "1. Check SMS settings in your phone.\n" +
+                "2. Restart your phone.\n" +
+                "3. Confirm sufficient credit or plan allowance.");
+        knowledgeBase.put("browse", "Troubleshooting browsing issues:\n" +
+                "1. Check your data plan status.\n" +
+                "2. Toggle mobile data off and on.\n" +
+                "3. Restart your phone.");
+    }
+
+    // Fetch knowledge based on issue (simulate vector DB search)
+    public String getKnowledge(String issue) {
+        return knowledgeBase.getOrDefault(issue, "No knowledge available for '" + issue + "'.");
+    }
+}
+```
+
+#### 2. Updated CallAgent with Knowledge Context
+The `CallAgent` now supports both predefined steps and dynamic knowledge retrieval.
+
+```java
+import java.util.ArrayList;
+import java.util.List;
+
+class CallAgent extends IssueAgent {
+    private final List<String> predefinedSteps; // Manual steps
+    private final KnowledgeService knowledgeService;
+    private final boolean usePredefinedSteps; // Switch
+    private int currentStepIndex; // For predefined steps mode
+
+    public CallAgent(LlmService llmService, ChatHistoryService chatHistoryService, KnowledgeService knowledgeService, 
+                     String sessionId, boolean usePredefinedSteps) {
+        super(llmService, chatHistoryService, sessionId);
+        this.knowledgeService = knowledgeService;
+        this.usePredefinedSteps = usePredefinedSteps;
+        this.predefinedSteps = new ArrayList<>();
+        if (usePredefinedSteps) {
+            this.predefinedSteps.add("Ask if the user has checked their signal strength.");
+            this.predefinedSteps.add("Suggest restarting the phone.");
+            this.predefinedSteps.add("Suggest checking if airplane mode is on.");
+            this.predefinedSteps.add("Suggest verifying the SIM card is inserted correctly.");
+        }
+        this.currentStepIndex = 0;
+    }
+
+    @Override
+    public Object processInput(String input) {
+        saveToHistory("User: " + input);
+        return input;
+    }
+
+    @Override
+    public Object decide(Object processedData) {
+        String input = (String) processedData;
+        List<String> chatHistory = chatHistoryService.getChatHistory(sessionId);
+        String prompt;
+
+        if (usePredefinedSteps) {
+            // Predefined steps mode
+            if (currentStepIndex >= predefinedSteps.size()) {
+                prompt = "User says: '" + input + "'. All predefined steps exhausted. Suggest contacting support.";
+            } else {
+                String step = predefinedSteps.get(currentStepIndex);
+                prompt = step + "\nUser response: '" + input + "'\nProvide a natural response based on this step.";
+                currentStepIndex++;
+            }
+        } else {
+            // Knowledge document mode
+            String knowledge = knowledgeService.getKnowledge("call");
+            prompt = "User says: '" + input + "'\n" +
+                     "Use this knowledge to provide troubleshooting steps:\n" + knowledge + "\n" +
+                     "Based on the chat history and knowledge, suggest the next step or ask a question.";
+        }
+
+        String response = llmService.generateResponse(prompt, chatHistory);
+        saveToHistory("Agent: " + response);
+        return response;
+    }
+
+    @Override
+    public boolean act(Object decision) {
+        String response = (String) decision;
+        communicate(response);
+        if (response.contains("restart the phone")) {
+            communicate("Action: Suggesting phone restart.");
+        }
+        return true;
+    }
+
+    @Override
+    public void communicate(String message) {
+        System.out.println("[CallAgent] " + message);
+    }
+
+    public int getCurrentStepIndex() {
+        return currentStepIndex;
+    }
+
+    public void resetSteps() {
+        currentStepIndex = 0;
+    }
+}
+```
+
+#### 3. Updated TextAgent with Knowledge Context
+Similarly updated for texting issues.
+
+```java
+class TextAgent extends IssueAgent {
+    private final List<String> predefinedSteps;
+    private final KnowledgeService knowledgeService;
+    private final boolean usePredefinedSteps;
+    private int currentStepIndex;
+
+    public TextAgent(LlmService llmService, ChatHistoryService chatHistoryService, KnowledgeService knowledgeService, 
+                     String sessionId, boolean usePredefinedSteps) {
+        super(llmService, chatHistoryService, sessionId);
+        this.knowledgeService = knowledgeService;
+        this.usePredefinedSteps = usePredefinedSteps;
+        this.predefinedSteps = new ArrayList<>();
+        if (usePredefinedSteps) {
+            this.predefinedSteps.add("Ask if the user has checked SMS settings.");
+            this.predefinedSteps.add("Suggest restarting the phone.");
+            this.predefinedSteps.add("Confirm sufficient credit or plan allowance.");
+        }
+        this.currentStepIndex = 0;
+    }
+
+    @Override
+    public Object processInput(String input) {
+        saveToHistory("User: " + input);
+        return input;
+    }
+
+    @Override
+    public Object decide(Object processedData) {
+        String input = (String) processedData;
+        List<String> chatHistory = chatHistoryService.getChatHistory(sessionId);
+        String prompt;
+
+        if (usePredefinedSteps) {
+            if (currentStepIndex >= predefinedSteps.size()) {
+                prompt = "User says: '" + input + "'. All predefined steps exhausted. Suggest contacting support.";
+            } else {
+                String step = predefinedSteps.get(currentStepIndex);
+                prompt = step + "\nUser response: '" + input + "'\nProvide a natural response.";
+                currentStepIndex++;
+            }
+        } else {
+            String knowledge = knowledgeService.getKnowledge("text");
+            prompt = "User says: '" + input + "'\n" +
+                     "Use this knowledge to provide troubleshooting steps:\n" + knowledge + "\n" +
+                     "Suggest the next step or ask a question based on the chat history.";
+        }
+
+        String response = llmService.generateResponse(prompt, chatHistory);
+        saveToHistory("Agent: " + response);
+        return response;
+    }
+
+    @Override
+    public boolean act(Object decision) {
+        communicate((String) decision);
+        return true;
+    }
+
+    @Override
+    public void communicate(String message) {
+        System.out.println("[TextAgent] " + message);
+    }
+}
+```
+
+#### 4. Updated BrowseAgent with Knowledge Context
+For browsing issues.
+
+```java
+class BrowseAgent extends IssueAgent {
+    private final List<String> predefinedSteps;
+    private final KnowledgeService knowledgeService;
+    private final boolean usePredefinedSteps;
+    private int currentStepIndex;
+
+    public BrowseAgent(LlmService llmService, ChatHistoryService chatHistoryService, KnowledgeService knowledgeService, 
+                       String sessionId, boolean usePredefinedSteps) {
+        super(llmService, chatHistoryService, sessionId);
+        this.knowledgeService = knowledgeService;
+        this.usePredefinedSteps = usePredefinedSteps;
+        this.predefinedSteps = new ArrayList<>();
+        if (usePredefinedSteps) {
+            this.predefinedSteps.add("Ask if the user has checked their data plan status.");
+            this.predefinedSteps.add("Suggest toggling mobile data off and on.");
+            this.predefinedSteps.add("Suggest restarting the phone.");
+        }
+        this.currentStepIndex = 0;
+    }
+
+    @Override
+    public Object processInput(String input) {
+        saveToHistory("User: " + input);
+        return input;
+    }
+
+    @Override
+    public Object decide(Object processedData) {
+        String input = (String) processedData;
+        List<String> chatHistory = chatHistoryService.getChatHistory(sessionId);
+        String prompt;
+
+        if (usePredefinedSteps) {
+            if (currentStepIndex >= predefinedSteps.size()) {
+                prompt = "User says: '" + input + "'. All predefined steps exhausted. Suggest contacting support.";
+            } else {
+                String step = predefinedSteps.get(currentStepIndex);
+                prompt = step + "\nUser response: '" + input + "'\nProvide a natural response.";
+                currentStepIndex++;
+            }
+        } else {
+            String knowledge = knowledgeService.getKnowledge("browse");
+            prompt = "User says: '" + input + "'\n" +
+                     "Use this knowledge to provide troubleshooting steps:\n" + knowledge + "\n" +
+                     "Suggest the next step or ask a question based on the chat history.";
+        }
+
+        String response = llmService.generateResponse(prompt, chatHistory);
+        saveToHistory("Agent: " + response);
+        return response;
+    }
+
+    @Override
+    public boolean act(Object decision) {
+        communicate((String) decision);
+        return true;
+    }
+
+    @Override
+    public void communicate(String message) {
+        System.out.println("[BrowseAgent] " + message);
+    }
+}
+```
+
+#### 5. Updated OrchestratorAgent
+The orchestrator now initializes agents with the knowledge service and switch.
+
+```java
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Scanner;
+
+public class OrchestratorAgent implements Agent<String> {
+    private final Map<String, IssueAgent> agents;
+    private final LlmService llmService;
+    private final ChatHistoryService chatHistoryService;
+    private final KnowledgeService knowledgeService;
+    private final String sessionId;
+    private boolean active = true;
+    private String currentAgentKey;
+    private final boolean usePredefinedSteps; // Switch for steps mode
+
+    public OrchestratorAgent(String sessionId, boolean usePredefinedSteps) {
+        this.llmService = new LlmService();
+        this.chatHistoryService = new ChatHistoryService();
+        this.knowledgeService = new KnowledgeService();
+        this.sessionId = sessionId;
+        this.usePredefinedSteps = usePredefinedSteps;
+        this.agents = new HashMap<>();
+        agents.put("call", new CallAgent(llmService, chatHistoryService, knowledgeService, sessionId, usePredefinedSteps));
+        agents.put("text", new TextAgent(llmService, chatHistoryService, knowledgeService, sessionId, usePredefinedSteps));
+        agents.put("browse", new BrowseAgent(llmService, chatHistoryService, knowledgeService, sessionId, usePredefinedSteps));
+        this.currentAgentKey = null;
+    }
+
+    @Override
+    public String perceiveEnvironment() {
+        communicate("What issue are you facing? (e.g., 'I can’t call', 'No texting', 'Can’t browse', or 'quit')");
+        Scanner scanner = new Scanner(System.in);
+        return scanner.nextLine().toLowerCase();
+    }
+
+    @Override
+    public Object processInput(String input) {
+        chatHistoryService.saveChatHistory(sessionId, "User: " + input);
+        if (input.contains("quit")) return "exit";
+
+        List<String> chatHistory = chatHistoryService.getChatHistory(sessionId);
+        String prompt = "Classify this user input into one or more issues (call, text, browse): '" + input + "'";
+        String classification = llmService.generateResponse(prompt, chatHistory);
+        chatHistoryService.saveChatHistory(sessionId, "Agent: Classified as " + classification);
+        return classification.split(",");
+    }
+
+    @Override
+    public Object decide(Object processedData) {
+        String[] issues = (String[]) processedData;
+        StringBuilder response = new StringBuilder();
+
+        for (String issue : issues) {
+            issue = issue.trim();
+            if (issue.equals("exit")) {
+                active = false;
+                return "Goodbye";
+            }
+            if (agents.containsKey(issue)) {
+                if (currentAgentKey != null && !currentAgentKey.equals(issue)) {
+                    response.append("Switching to handle '").append(issue).append("' issue.\n");
+                }
+                currentAgentKey = issue;
+                IssueAgent agent = agents.get(issue);
+                Object agentDecision = agent.decide(agent.processInput(input));
+                agent.act(agentDecision);
+                response.append(agentDecision).append("\n");
+            } else {
+                response.append("I don’t recognize '").append(issue).append("'. Try 'call', 'text', or 'browse'.\n");
+            }
+        }
+        return response.toString();
+    }
+
+    @Override
+    public boolean act(Object decision) {
+        communicate((String) decision);
+        return true;
+    }
+
+    @Override
+    public void communicate(String message) {
+        System.out.println("[Orchestrator] " + message);
+    }
+
+    @Override
+    public boolean handleError(Exception error) {
+        communicate("Error: " + error.getMessage());
+        return false;
+    }
+
+    @Override
+    public boolean isActive() {
+        return active;
+    }
+
+    public static void main(String[] args) {
+        String sessionId = "session_" + System.currentTimeMillis();
+        // Toggle this to switch between predefined steps and knowledge docs
+        boolean usePredefinedSteps = false; // Set to true for manual steps
+        OrchestratorAgent orchestrator = new OrchestratorAgent(sessionId, usePredefinedSteps);
+        while (orchestrator.isActive()) {
+            try {
+                String input = orchestrator.perceiveEnvironment();
+                Object processed = orchestrator.processInput(input);
+                Object decision = orchestrator.decide(processed);
+                orchestrator.act(decision);
+            } catch (Exception e) {
+                orchestrator.handleError(e);
+            }
+        }
+    }
+}
+```
+
+#### 6. LlmService and ChatHistoryService (Unchanged)
+These remain as in the previous version, handling stateless REST API calls and MongoDB storage, respectively.
+
+---
+
+### How It Works
+
+#### Knowledge Documents as Context
+- **KnowledgeService**: Simulates a vector database with hardcoded docs. Replace `knowledgeBase` with a real vector DB query (e.g., embedding search for "call issues").
+- **Dynamic Mode (`usePredefinedSteps = false`)**:
+  - `CallAgent` fetches knowledge (e.g., "Troubleshooting call issues: 1. Check signal strength...") via `knowledgeService.getKnowledge("call")`.
+  - The LLM uses this as context to suggest the next step dynamically, based on chat history and user input.
+  - Example:
+    ```
+    User: "I can’t call"
+    [CallAgent] "Have you checked your signal strength?"
+    User: "Yes"
+    [CallAgent] "Please restart your phone."
+    ```
+
+#### Switch for Predefined Steps
+- **Predefined Mode (`usePredefinedSteps = true`)**:
+  - Uses the hardcoded `predefinedSteps` list and follows the ordered execution from the previous version.
+  - Example:
+    ```
+    User: "I can’t call"
+    [CallAgent] "Have you checked your signal strength?"
+    User: "Yes"
+    [CallAgent] "Suggest restarting the phone."
+    ```
+- **Toggle**: Set `usePredefinedSteps` in `main` to switch modes.
+
+#### Mid-Flow Interruptions
+- The orchestrator’s logic (unchanged from the last version) still handles switching to `TextAgent` if the user mentions texting issues mid-flow with `CallAgent`.
+
+---
+
+### Integration with Vector Database
+To use a real vector database:
+1. **Replace `KnowledgeService`**:
+   ```java
+   import some.vector.db.client.VectorDBClient; // e.g., Pinecone, Faiss
+
+   class KnowledgeService {
+       private final VectorDBClient vectorDB;
+
+       public KnowledgeService() {
+           this.vectorDB = new VectorDBClient("your-config");
+       }
+
+       public String getKnowledge(String issue) {
+           // Embed the issue and query the vector DB
+           String queryEmbedding = embed(issue); // Use an embedding model
+           List<String> results = vectorDB.search(queryEmbedding, 1); // Top result
+           return results.isEmpty() ? "No knowledge found" : results.get(0);
+       }
+   }
+   ```
+2. **Store Docs**: Preload troubleshooting docs into the vector DB with embeddings.
+
+---
+
+### Running the Code
+- **Toggle Mode**: In `main`, set `usePredefinedSteps = true` for manual steps or `false` for knowledge-based steps.
+- **Test**:
+  - Predefined: Steps follow the hardcoded list.
+  - Knowledge: LLM uses the retrieved doc as context, adapting dynamically.
+
+---
+
+### Example Output
+**Predefined Mode**:
+```
+User: "I can’t call"
+[CallAgent] "Have you checked your signal strength?"
+User: "Yes"
+[CallAgent] "Suggest restarting the phone."
+```
+
+**Knowledge Mode**:
+```
+User: "I can’t call"
+[CallAgent] "Let’s check your signal strength first. Do you have bars?"
+User: "Yes"
+[CallAgent] "Okay, try restarting your phone to reset the network."
+```
+
+Let me know if you need help integrating a specific vector DB or refining the knowledge retrieval further!
