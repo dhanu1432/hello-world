@@ -1,0 +1,51 @@
+I need a Spring Boot application named "Dice" that implements an AI Agent-based chatbot for troubleshooting mobile phone connectivity issues. The solution should include the following features:
+
+1. **Agent Structure**:
+   - Use an `Agent` interface with methods: `perceiveEnvironment`, `processInput`, `decide`, `act`, `communicate`, `handleError`, `isActive`, and `learn`.
+   - Implement a multi-agent system with an `OrchestratorAgent` coordinating individual agents (`CallAgent`, `TextAgent`, `BrowseAgent`).
+   - Each agent should be a Spring component, with `CallAgent` supporting sub-flows: "cant_make_calls", "cant_receive_calls", "dropped_calls".
+
+2. **REST API**:
+   - Create a `DiceController` with two endpoints:
+     - `/engage`: Starts a new session, accepts `olSessionId` (client session ID) and `flowIdentifier` ("call", "text", "browse"), generates a `diceSessionId`, and returns an initial response.
+     - `/next`: Continues a session, accepts `diceSessionId`, `olSessionId`, and `userInput`, and processes the next step.
+   - Input object: `DiceSessionContext` with fields `olSessionId`, `diceSessionId`, `flowIdentifier`, `userInput`, and `ban` (Billing Account Number).
+
+3. **Session Management**:
+   - Store session state (e.g., current sub-flow, step index) in MongoDB to resume sessions if the user abruptly ends and returns later using `diceSessionId`.
+   - Use `ban` to associate sessions with a billing account.
+
+4. **LLM Integration**:
+   - Integrate with an internal stateless REST API for LLM calls, sending the full chat history (stored in MongoDB) with each request.
+   - LLM should return JSON responses with `text`, `tool`, and `toolInput` fields.
+
+5. **Tool Usage**:
+   - Support external API calls as tools (e.g., `NetworkStatusTool`) that agents can invoke based on LLM suggestions.
+   - Process tool responses (e.g., JSON) and take actions (e.g., "Move to better coverage" if signal is weak).
+
+6. **Knowledge and Steps**:
+   - Provide a switch (`usePredefinedSteps`) to toggle between:
+     - Predefined steps (e.g., "Check signal strength", "Restart phone") for each flow/sub-flow.
+     - Dynamic steps retrieved from a knowledge document (simulated vector database via `KnowledgeService`).
+   - Send knowledge as context to the LLM.
+
+7. **Learning Functionality**:
+   - Implement `learn` in the `Agent` interface to record successful resolutions (issue, sub-flow, solution) in MongoDB via `LearningService`.
+   - Use past successes to improve future suggestions.
+
+8. **Session Summary**:
+   - At session end (e.g., "quit" or "fixed"), generate a summary from the LLM including:
+     - Steps performed and their effectiveness (effective/ineffective).
+     - Customer sentiment (positive, negative, neutral).
+   - Store in MongoDB (`session_summaries` collection) with `olSessionId`, `diceSessionId`, `ban`, `summary`, and `sentiment`.
+   - Retrieve past summaries for a `ban` and send to LLM to inform suggestions based on what worked or didn’t.
+
+9. **Spring Integration**:
+   - Use Spring Boot with dependency injection (`@Autowired`, `@Component`, `@Service`).
+   - Agents are prototype-scoped for session-specific instances.
+   - Store configuration (e.g., API endpoints, keys) in `application.properties`.
+
+10. **MongoDB**:
+    - Collections: `chat_history` (session messages), `agent_state` (agent progress), `learned_outcomes` (successful solutions), `session_summaries` (end-of-session data).
+
+Provide a complete Java implementation with all classes, including `DiceApplication`, `DiceController`, `OrchestratorAgent`, `CallAgent`, `LlmService`, `ChatHistoryService`, `KnowledgeService`, `LearningService`, `SessionSummaryService`, and `NetworkStatusTool`. Include sample flows for "call" with sub-flows, showing session resumption, tool usage, learning, and summary generation.
