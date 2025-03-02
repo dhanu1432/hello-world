@@ -1,0 +1,43 @@
+I need a Spring Boot application named "Dice" that implements an AI Agent-based chatbot for troubleshooting mobile phone connectivity issues. The solution should meet the following high-level requirements:
+
+1. **Agent Structure**:
+   - Define a multi-agent system with a coordinator agent managing individual agents for specific flows (e.g., call, text, browse).
+   - Support sub-flows within the call flow (e.g., can’t make calls, can’t receive calls, dropped calls).
+   - Enable agents to learn from successful resolutions and improve over time.
+
+2. **REST API**:
+   - Provide two endpoints:
+     - `/engage`: Start a new session with a client-provided session ID (`olSessionId`) and flow identifier (`flowIdentifier`), returning a server-generated session ID (`diceSessionId`).
+     - `/next`: Continue an existing session using `diceSessionId`, `olSessionId`, and user input.
+   - Use an input object containing `olSessionId`, `diceSessionId`, `flowIdentifier`, `userInput`, and `ban` (Billing Account Number).
+
+3. **Session Management**:
+   - Persist session state to resume where the user left off if they abruptly end and return later, using `diceSessionId`.
+   - Associate sessions with a `ban` for tracking.
+
+4. **LLM Integration**:
+   - Integrate with a stateless internal REST API for LLM interactions, passing the full chat history with each request.
+   - Support LLM responses that trigger external tools when needed.
+
+5. **Tool Usage**:
+   - Enable agents to call external APIs (e.g., network status checks) based on LLM suggestions.
+   - Process tool responses to inform next steps or actions.
+
+6. **Knowledge and Steps**:
+   - Allow toggling between predefined troubleshooting steps and dynamically retrieved knowledge for each flow.
+   - Use knowledge as context for LLM suggestions.
+
+7. **Learning Functionality**:
+   - Record successful resolutions and use them to enhance future troubleshooting suggestions.
+
+8. **Session Summary**:
+   - Generate a summary at session end, including steps performed, their effectiveness, and customer sentiment (positive, negative, neutral).
+   - Store summaries with `olSessionId`, `diceSessionId`, `ban`, and retrieve them for future sessions to inform LLM suggestions.
+
+9. **Spring Integration**:
+   - Build as a Spring Boot application with dependency injection and configuration externalized (e.g., API endpoints, keys).
+
+10. **Data Storage**:
+    - Use MongoDB to store chat history, agent state, learned outcomes, and session summaries.
+
+Provide a high-level design meeting these requirements, focusing on functionality without specific implementation details.
