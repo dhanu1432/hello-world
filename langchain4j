@@ -1,0 +1,101 @@
+langchain4j
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.langchain4j.agent.tool.Tool;
+
+import java.lang.reflect.Method;
+import java.lang.reflect.Parameter;
+import java.util.HashMap;
+import java.util.Map;
+
+class ToolExecutor {
+    
+    private static final ObjectMapper objectMapper = new ObjectMapper();
+    private final Object toolInstance;
+
+    public ToolExecutor(Object toolInstance) {
+        this.toolInstance = toolInstance;
+    }
+
+    public String executeTool(String toolCallJson) {
+        try {
+            // Parse JSON response from LLM
+            Map<String, Object> toolCall = objectMapper.readValue(toolCallJson, Map.class);
+
+            // Extract tool name and arguments
+            String toolName = (String) toolCall.get("name");
+            Map<String, Object> arguments = (Map<String, Object>) toolCall.get("arguments");
+
+            // Find method
+            Method toolMethod = findMethod(toolName);
+            if (toolMethod == null) {
+                return createErrorResponse("Tool method '" + toolName + "' not found.");
+            }
+
+            // Validate arguments
+            Object[] params = validateAndMapArguments(toolMethod, arguments);
+            if (params == null) {
+                return createErrorResponse("Invalid parameters for tool '" + toolName + "'. Expected: " + getExpectedParams(toolMethod));
+            }
+
+            // Execute method
+            Object result = toolMethod.invoke(toolInstance, params);
+            return objectMapper.writeValueAsString(Map.of("tool_response", result));
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            return createErrorResponse("Tool execution failed: " + e.getMessage());
+        }
+    }
+
+    private Method findMethod(String toolName) {
+        for (Method method : toolInstance.getClass().getMethods()) {
+            if (method.isAnnotationPresent(Tool.class) && method.getName().equals(toolName)) {
+                return method;
+            }
+        }
+        return null;
+    }
+
+    private Object[] validateAndMapArguments(Method method, Map<String, Object> arguments) {
+        Parameter[] parameters = method.getParameters();
+        Object[] params = new Object[parameters.length];
+
+        if (arguments.size() != parameters.length) {
+            return null; // Incorrect parameter count
+        }
+
+        for (int i = 0; i < parameters.length; i++) {
+            String paramName = parameters[i].getName(); // Java removes param names, consider using @Param annotation instead
+            Class<?> paramType = parameters[i].getType();
+
+            if (!arguments.containsKey(paramName)) {
+                return null; // Missing parameter
+            }
+
+            try {
+                params[i] = objectMapper.convertValue(arguments.get(paramName), paramType);
+            } catch (IllegalArgumentException e) {
+                return null; // Type conversion failed
+            }
+        }
+        return params;
+    }
+
+    private String getExpectedParams(Method method) {
+        Parameter[] parameters = method.getParameters();
+        Map<String, String> expectedParams = new HashMap<>();
+        for (Parameter param : parameters) {
+            expectedParams.put(param.getName(), param.getType().getSimpleName());
+        }
+        return expectedParams.toString();
+    }
+
+    private String createErrorResponse(String message) {
+        try {
+            return objectMapper.writeValueAsString(Map.of("error", message));
+        } catch (Exception e) {
+            return "{\"error\": \"Unknown error occurred\"}";
+        }
+    }
+}
