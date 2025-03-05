@@ -1,0 +1,1232 @@
+To make the "Dice" Spring Boot application fully stateless and minimize the use of prototype beans, we need to eliminate in-memory state (e.g., instance variables like `currentStepIndex`, `currentSubFlow`, `active`) from all classes and store it externally in MongoDB. Additionally, we’ll aim to make all classes singleton (Spring’s default scope) by removing `@Scope("prototype")` annotations and ensuring no session-specific state is held within the objects. Here’s how we’ll achieve this:
+
+---
+
+### Design Changes
+1. **Stateless Agents**:
+   - Move all state (`currentStepIndex`, `currentSubFlow`, `active`, etc.) to MongoDB (`ChatHistoryService`).
+   - Retrieve state on each request and update it after processing.
+2. **Singleton Scope**:
+   - Remove `@Scope("prototype")` from `CallAgent`, `TextAgent`, and `BrowseAgent`.
+   - Pass `diceSessionId` explicitly to methods to fetch/update state.
+3. **Factory Adjustment**:
+   - Modify `AgentFactory` to return singleton instances, passing `diceSessionId` as a method parameter instead of constructor injection.
+4. **No In-Memory Session Tracking**:
+   - Rely entirely on MongoDB for session data, eliminating the need for an in-memory `activeSessions` map or instance-specific state.
+
+Below is the fully refactored stateless solution with singleton beans.
+
+---
+
+### Updated Java Classes
+
+#### 1. `DiceApplication.java`
+```java
+package com.example.dice;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class DiceApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(DiceApplication.class, args);
+    }
+}
+```
+
+#### 2. `Agent.java`
+```java
+package com.example.dice;
+
+public interface Agent<T> {
+    T perceiveEnvironment();
+    Object processInput(T input);
+    Object decide(String sessionId, String input);
+    String act(String sessionId, Object decision);
+    void communicate(String message);
+    boolean handleError(Exception error);
+    boolean isActive(String sessionId);
+    void learn(String sessionId, String issue, String subFlow, String solution);
+}
+```
+
+#### 3. `AgentMode.java`
+```java
+package com.example.dice;
+
+public enum AgentMode {
+    DETERMINISTIC,
+    AGENT_AS_A_DRIVER,
+    LLM_AS_A_DRIVER
+}
+```
+
+#### 4. `AgentFactory.java`
+```java
+package com.example.dice;
+
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Component;
+
+@Component
+@RequiredArgsConstructor
+public class AgentFactory {
+    private final CallAgent callAgent;
+    private final TextAgent textAgent;
+    private final BrowseAgent browseAgent;
+
+    public IssueAgent getAgent(String flowIdentifier) {
+        switch (flowIdentifier.toLowerCase()) {
+            case "call":
+                return callAgent;
+            case "text":
+                return textAgent;
+            case "browse":
+                return browseAgent;
+            default:
+                throw new IllegalArgumentException("Unknown flowIdentifier: " + flowIdentifier);
+        }
+    }
+}
+```
+
+#### 5. `DiceSessionContext.java`
+```java
+package com.example.dice;
+
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
+
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+public class DiceSessionContext {
+    private String olSessionId;
+    private String diceSessionId;
+    private String flowIdentifier;
+    private String userInput;
+    private String ban;
+}
+```
+
+#### 6. `DiceController.java`
+```java
+package com.example.dice;
+
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.UUID;
+
+@RestController
+@RequestMapping("/dice")
+@RequiredArgsConstructor
+public class DiceController {
+    private final LlmService llmService;
+    private final ChatHistoryService chatHistoryService;
+    private final KnowledgeService knowledgeService;
+    private final LearningService learningService;
+    private final SessionSummaryService sessionSummaryService;
+    private final AgentFactory agentFactory;
+
+    @PostMapping("/engage")
+    public ResponseEntity<String> engage(@RequestBody DiceSessionContext context) {
+        if (context.getBan() == null) {
+            return ResponseEntity.badRequest().body("BAN is required.");
+        }
+        String diceSessionId = "dice_" + UUID.randomUUID().toString();
+        context.setDiceSessionId(diceSessionId);
+
+        OrchestratorAgent orchestrator = new OrchestratorAgent(
+            llmService, chatHistoryService, knowledgeService, learningService, sessionSummaryService, agentFactory
+        );
+        String response = orchestrator.startSession(context);
+        return ResponseEntity.ok("Session started. diceSessionId: " + diceSessionId + "\n" + response);
+    }
+
+    @PostMapping("/next")
+    public ResponseEntity<String> next(@RequestBody DiceSessionContext context) {
+        if (context.getBan() == null || context.getDiceSessionId() == null) {
+            return ResponseEntity.badRequest().body("BAN and diceSessionId are required.");
+        }
+        String diceSessionId = context.getDiceSessionId();
+
+        OrchestratorAgent orchestrator = new OrchestratorAgent(
+            llmService, chatHistoryService, knowledgeService, learningService, sessionSummaryService, agentFactory
+        );
+        String response = orchestrator.continueSession(context);
+        return ResponseEntity.ok(response);
+    }
+}
+```
+
+#### 7. `OrchestratorAgent.java`
+```java
+package com.example.dice;
+
+import com.google.gson.Gson;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Component;
+
+import java.util.List;
+import java.util.Map;
+
+@Component
+@RequiredArgsConstructor
+public class OrchestratorAgent implements Agent<DiceSessionContext> {
+    private final LlmService llmService;
+    private final ChatHistoryService chatHistoryService;
+    private final KnowledgeService knowledgeService;
+    private final LearningService learningService;
+    private final SessionSummaryService sessionSummaryService;
+    private final AgentFactory agentFactory;
+
+    @Override
+    public DiceSessionContext perceiveEnvironment() {
+        return null;
+    }
+
+    @Override
+    public Object processInput(DiceSessionContext context) {
+        String input = context.getUserInput() != null ? context.getUserInput() : context.getFlowIdentifier();
+        chatHistoryService.saveChatHistory(context.getDiceSessionId(), "User: " + input);
+        if (input.contains("quit")) return "exit";
+
+        ChatHistoryService.OrchestratorState state = chatHistoryService.getOrchestratorState(context.getDiceSessionId());
+        if (state == null) {
+            state = new ChatHistoryService.OrchestratorState(
+                context.getDiceSessionId(), context.getOlSessionId(), context.getBan(), null, true
+            );
+        } else {
+            state.setOlSessionId(context.getOlSessionId());
+            state.setBan(context.getBan());
+        }
+        chatHistoryService.saveOrchestratorState(state);
+
+        List<String> chatHistory = chatHistoryService.getChatHistory(context.getDiceSessionId());
+        String prompt = "Classify this user input into one or more issues (call, text, browse): '" + input + "'";
+        LlmService.LlmResponse response = llmService.generateResponse(prompt, chatHistory);
+        chatHistoryService.saveChatHistory(context.getDiceSessionId(), "Agent: Classified as " + response.getText());
+        return response.getText().split(",");
+    }
+
+    @Override
+    public Object decide(String sessionId, String input) {
+        ChatHistoryService.OrchestratorState state = chatHistoryService.getOrchestratorState(sessionId);
+        if (state == null || !state.isActive()) {
+            return "Session not initialized or completed. Start a new session with /engage.";
+        }
+
+        Object processed = processInput(new DiceSessionContext(state.getOlSessionId(), sessionId, state.getCurrentAgentKey(), input, state.getBan()));
+        String[] issues = (String[]) processed;
+        StringBuilder response = new StringBuilder();
+
+        for (String issue : issues) {
+            issue = issue.trim();
+            if (issue.equals("exit")) {
+                state.setActive(false);
+                chatHistoryService.saveOrchestratorState(state);
+                generateAndSaveSummary(sessionId);
+                return "Goodbye";
+            }
+            if (agentFactory.getAgent(issue) != null) {
+                if (state.getCurrentAgentKey() != null && !state.getCurrentAgentKey().equals(issue)) {
+                    response.append("Switching to handle '").append(issue).append("' issue.\n");
+                }
+                state.setCurrentAgentKey(issue);
+                chatHistoryService.saveOrchestratorState(state);
+                IssueAgent agent = agentFactory.getAgent(issue);
+                Object agentDecision = agent.decide(sessionId, input);
+                String agentResponse = agent.act(sessionId, agentDecision);
+                response.append(agentResponse).append("\n");
+            } else {
+                response.append("I don’t recognize '").append(issue).append("'. Try 'call', 'text', or 'browse'.\n");
+            }
+        }
+        return response.toString();
+    }
+
+    @Override
+    public String act(String sessionId, Object decision) {
+        String message = (String) decision;
+        communicate(message);
+        return message;
+    }
+
+    @Override
+    public void communicate(String message) {
+        System.out.println("[Orchestrator] " + message);
+    }
+
+    @Override
+    public boolean handleError(Exception error) {
+        communicate("Error: " + error.getMessage());
+        return false;
+    }
+
+    @Override
+    public boolean isActive(String sessionId) {
+        ChatHistoryService.OrchestratorState state = chatHistoryService.getOrchestratorState(sessionId);
+        return state != null && state.isActive();
+    }
+
+    @Override
+    public void learn(String sessionId, String issue, String subFlow, String solution) {
+    }
+
+    public String startSession(DiceSessionContext context) {
+        ChatHistoryService.OrchestratorState state = new ChatHistoryService.OrchestratorState(
+            context.getDiceSessionId(), context.getOlSessionId(), context.getBan(), context.getFlowIdentifier(), true
+        );
+        chatHistoryService.saveOrchestratorState(state);
+
+        IssueAgent agent = agentFactory.getAgent(context.getFlowIdentifier());
+        if (agent == null) {
+            return "Invalid flowIdentifier: " + context.getFlowIdentifier() + ". Use 'call', 'text', or 'browse'.";
+        }
+        Object decision = agent.decide(context.getDiceSessionId(), "");
+        return agent.act(context.getDiceSessionId(), decision);
+    }
+
+    public String continueSession(DiceSessionContext context) {
+        return (String) decide(context.getDiceSessionId(), context.getUserInput());
+    }
+
+    private void generateAndSaveSummary(String sessionId) {
+        ChatHistoryService.OrchestratorState state = chatHistoryService.getOrchestratorState(sessionId);
+        List<String> chatHistory = chatHistoryService.getChatHistory(sessionId);
+        String summaryJson = llmService.generateSessionSummary(chatHistory);
+        Gson gson = new Gson();
+        Map<String, String> summaryMap = gson.fromJson(summaryJson, Map.class);
+        String summary = summaryMap.get("summary");
+        String sentiment = summaryMap.get("sentiment");
+        sessionSummaryService.saveSessionSummary(state.getOlSessionId(), sessionId, state.getBan(), summary, sentiment);
+    }
+
+    public String getDiceSessionId() {
+        return diceSessionId;
+    }
+}
+```
+
+#### 8. `IssueAgent.java`
+```java
+package com.example.dice;
+
+import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.env.Environment;
+import org.springframework.stereotype.Component;
+
+@Component
+@RequiredArgsConstructor
+public abstract class IssueAgent implements Agent<DiceSessionContext> {
+    protected final LlmService llmService;
+    protected final ChatHistoryService chatHistoryService;
+    protected final LearningService learningService;
+    protected final Environment environment;
+
+    @Value("${agent.default.mode:LLM_AS_A_DRIVER}")
+    protected AgentMode defaultMode;
+
+    protected abstract AgentMode getAgentMode();
+
+    protected abstract String getAgentKey();
+
+    protected AgentMode getEffectiveMode(String sessionId, String subFlow) {
+        ChatHistoryService.OrchestratorState orchestratorState = chatHistoryService.getOrchestratorState(sessionId);
+        String flowIdentifier = orchestratorState != null ? orchestratorState.getCurrentAgentKey() : getAgentKey();
+
+        AgentMode agentMode = getAgentMode();
+        if (agentMode != null && !agentMode.name().equalsIgnoreCase("default")) {
+            return agentMode;
+        }
+
+        String subFlowModeProperty = subFlow != null ? "agent." + flowIdentifier + "." + subFlow + ".mode" : "agent." + flowIdentifier + ".mode";
+        String modeValue = environment.getProperty(subFlowModeProperty, defaultMode.name());
+        return AgentMode.valueOf(modeValue.toUpperCase());
+    }
+
+    @Override
+    public DiceSessionContext perceiveEnvironment() {
+        return null;
+    }
+
+    @Override
+    public Object processInput(DiceSessionContext input) {
+        return input.getUserInput();
+    }
+
+    @Override
+    public boolean handleError(Exception error) {
+        communicate("Error: " + error.getMessage());
+        return false;
+    }
+
+    @Override
+    public boolean isActive(String sessionId) {
+        ChatHistoryService.AgentState state = chatHistoryService.getAgentState(sessionId, getAgentKey());
+        return state != null && !state.isCompleted();
+    }
+
+    @Override
+    public void learn(String sessionId, String issue, String subFlow, String solution) {
+        learningService.recordSuccess(issue, subFlow, solution);
+        ChatHistoryService.AgentState state = chatHistoryService.getAgentState(sessionId, issue);
+        if (state == null) {
+            state = new ChatHistoryService.AgentState(sessionId, issue, subFlow, 0, true);
+        } else {
+            state.setCompleted(true);
+        }
+        chatHistoryService.saveAgentState(state);
+    }
+
+    protected void saveToHistory(String sessionId, String message) {
+        chatHistoryService.saveChatHistory(sessionId, message);
+    }
+
+    protected String getBan(String sessionId) {
+        ChatHistoryService.OrchestratorState state = chatHistoryService.getOrchestratorState(sessionId);
+        return state != null ? state.getBan() : null;
+    }
+}
+```
+
+#### 9. `CallAgent.java`
+```java
+package com.example.dice;
+
+import lombok.Getter;
+import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.env.Environment;
+import org.springframework.stereotype.Component;
+
+import java.io.IOException;
+import java.util.List;
+import java.util.Map;
+
+@Component
+@RequiredArgsConstructor
+public class CallAgent extends IssueAgent {
+    private final KnowledgeService knowledgeService;
+    private final SessionSummaryService sessionSummaryService;
+    private final NetworkStatusTool networkStatusTool;
+
+    @Value("${agent.call.mode:default}")
+    private String agentMode;
+
+    private final Map<String, AgentTool> tools = Map.of("network_status", networkStatusTool);
+
+    public CallAgent(LlmService llmService, ChatHistoryService chatHistoryService, LearningService learningService,
+                     Environment environment, KnowledgeService knowledgeService, SessionSummaryService sessionSummaryService,
+                     NetworkStatusTool networkStatusTool) {
+        super(llmService, chatHistoryService, learningService, environment);
+        this.knowledgeService = knowledgeService;
+        this.sessionSummaryService = sessionSummaryService;
+        this.networkStatusTool = networkStatusTool;
+    }
+
+    @Override
+    protected AgentMode getAgentMode() {
+        return agentMode.equalsIgnoreCase("default") ? null : AgentMode.valueOf(agentMode.toUpperCase());
+    }
+
+    @Override
+    protected String getAgentKey() {
+        return "call";
+    }
+
+    @Override
+    public Object decide(String sessionId, String input) {
+        List<String> chatHistory = chatHistoryService.getChatHistory(sessionId);
+        ChatHistoryService.AgentState state = chatHistoryService.getAgentState(sessionId, "call");
+        String subFlow = state != null ? state.getSubFlow() : null;
+        int stepIndex = state != null ? state.getStepIndex() : 0;
+
+        if (subFlow == null) {
+            String prompt = "User says: '" + input + "'\n" +
+                            "Classify into a sub-flow: cant_make_calls, cant_receive_calls, dropped_calls. " +
+                            "If input is empty, ask the user to specify.";
+            LlmService.LlmResponse subFlowResponse = llmService.generateResponse(prompt, chatHistory);
+            if (subFlowResponse.getText().contains("specify")) {
+                return new Decision(subFlowResponse.getText(), null);
+            }
+            subFlow = subFlowResponse.getText().trim();
+            saveToHistory(sessionId, "Agent: Identified sub-flow: " + subFlow);
+            chatHistoryService.saveAgentState(new ChatHistoryService.AgentState(sessionId, "call", subFlow, 0, false));
+        }
+
+        AgentMode effectiveMode = getEffectiveMode(sessionId, subFlow);
+        String prompt;
+
+        switch (effectiveMode) {
+            case DETERMINISTIC:
+                List<String> steps = knowledgeService.getSteps("call");
+                if (stepIndex >= steps.size()) {
+                    prompt = "User says: '" + input + "'\nAll steps exhausted. Suggest contacting support.";
+                } else {
+                    String step = steps.get(stepIndex);
+                    prompt = step + "\nUser response: '" + input + "'\nProvide a natural response.";
+                    chatHistoryService.saveAgentState(new ChatHistoryService.AgentState(sessionId, "call", subFlow, stepIndex + 1, false));
+                }
+                break;
+
+            case AGENT_AS_A_DRIVER:
+                String knowledge = knowledgeService.getKnowledge("call");
+                String learnedSolution = learningService.getLearnedSolution("call", subFlow);
+                StringBuilder pastSummaries = new StringBuilder();
+                List<SessionSummaryService.SessionSummary> summaries = sessionSummaryService.getSummariesByBan(getBan(sessionId));
+                for (SessionSummaryService.SessionSummary summary : summaries) {
+                    pastSummaries.append("BAN: ").append(summary.getBan())
+                                 .append(", Summary: ").append(summary.getSummary())
+                                 .append(", Sentiment: ").append(summary.getSentiment()).append("\n");
+                }
+                prompt = "User says: '" + input + "'\n" +
+                         "Sub-flow: " + subFlow + "\n" +
+                         "Knowledge: " + knowledge + "\n" +
+                         (learnedSolution != null ? "Previously successful solution: " + learnedSolution + "\n" : "") +
+                         (pastSummaries.length() > 0 ? "Past summaries:\n" + pastSummaries.toString() : "") +
+                         "Suggest the next troubleshooting step or question.";
+                break;
+
+            case LLM_AS_A_DRIVER:
+                prompt = "User says: '" + input + "'\n" +
+                         "Sub-flow: " + subFlow + "\n" +
+                         "Fetch context from the web about mobile call troubleshooting and decide the next step or response.";
+                break;
+
+            default:
+                throw new IllegalStateException("Unknown mode: " + effectiveMode);
+        }
+
+        LlmService.LlmResponse response = llmService.generateResponse(prompt, chatHistory);
+        saveToHistory(sessionId, "Agent: " + response.getText());
+
+        if (input != null && (input.toLowerCase().contains("fixed") || input.toLowerCase().contains("working now"))) {
+            learn(sessionId, "call", subFlow, response.getText());
+            return new Decision("Great, glad it’s resolved!", null);
+        }
+
+        if (response.getTool() != null && tools.containsKey(response.getTool())) {
+            try {
+                String toolResult = tools.get(response.getTool()).execute(response.getToolInput() != null ? response.getToolInput() : "");
+                saveToHistory(sessionId, "Tool Result: " + toolResult);
+                return new Decision(response.getText(), toolResult);
+            } catch (IOException e) {
+                return new Decision(response.getText() + "\nTool failed: " + e.getMessage(), null);
+            }
+        }
+
+        return new Decision(response.getText(), null);
+    }
+
+    @Override
+    public String act(String sessionId, Object decisionObj) {
+        Decision decision = (Decision) decisionObj;
+        communicate(decision.text);
+        if (decision.toolResult != null) {
+            communicate("Tool Result: " + decision.toolResult);
+            if (decision.toolResult.contains("signal\": \"weak\"")) {
+                communicate("Action: Your signal is weak. Move to an area with better coverage.");
+            } else if (decision.toolResult.contains("status\": \"inactive\"")) {
+                communicate("Action: Your account is inactive. Please check with your provider.");
+            } else {
+                communicate("Action: Network seems fine. Let’s try another step.");
+            }
+        }
+        return decision.text;
+    }
+
+    @Override
+    public void communicate(String message) {
+        System.out.println("[CallAgent] " + message);
+    }
+
+    @Getter
+    private static class Decision {
+        private final String text;
+        private final String toolResult;
+
+        Decision(String text, String toolResult) {
+            this.text = text;
+            this.toolResult = toolResult;
+        }
+    }
+}
+```
+
+#### 10. `TextAgent.java`
+```java
+package com.example.dice;
+
+import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.env.Environment;
+import org.springframework.stereotype.Component;
+
+import java.util.List;
+
+@Component
+@RequiredArgsConstructor
+public class TextAgent extends IssueAgent {
+    private final KnowledgeService knowledgeService;
+    private final SessionSummaryService sessionSummaryService;
+
+    @Value("${agent.text.mode:default}")
+    private String agentMode;
+
+    public TextAgent(LlmService llmService, ChatHistoryService chatHistoryService, LearningService learningService,
+                     Environment environment, KnowledgeService knowledgeService, SessionSummaryService sessionSummaryService) {
+        super(llmService, chatHistoryService, learningService, environment);
+        this.knowledgeService = knowledgeService;
+        this.sessionSummaryService = sessionSummaryService;
+    }
+
+    @Override
+    protected AgentMode getAgentMode() {
+        return agentMode.equalsIgnoreCase("default") ? null : AgentMode.valueOf(agentMode.toUpperCase());
+    }
+
+    @Override
+    protected String getAgentKey() {
+        return "text";
+    }
+
+    @Override
+    public Object decide(String sessionId, String input) {
+        List<String> chatHistory = chatHistoryService.getChatHistory(sessionId);
+        ChatHistoryService.AgentState state = chatHistoryService.getAgentState(sessionId, "text");
+        int stepIndex = state != null ? state.getStepIndex() : 0;
+
+        AgentMode effectiveMode = getEffectiveMode(sessionId, null);
+        String prompt;
+
+        switch (effectiveMode) {
+            case DETERMINISTIC:
+                List<String> steps = knowledgeService.getSteps("text");
+                if (stepIndex >= steps.size()) {
+                    prompt = "User says: '" + input + "'\nAll steps exhausted. Suggest contacting support.";
+                } else {
+                    String step = steps.get(stepIndex);
+                    prompt = step + "\nUser response: '" + input + "'\nProvide a natural response.";
+                    chatHistoryService.saveAgentState(new ChatHistoryService.AgentState(sessionId, "text", null, stepIndex + 1, false));
+                }
+                break;
+
+            case AGENT_AS_A_DRIVER:
+                String knowledge = knowledgeService.getKnowledge("text");
+                String learnedSolution = learningService.getLearnedSolution("text", null);
+                StringBuilder pastSummaries = new StringBuilder();
+                List<SessionSummaryService.SessionSummary> summaries = sessionSummaryService.getSummariesByBan(getBan(sessionId));
+                for (SessionSummaryService.SessionSummary summary : summaries) {
+                    pastSummaries.append("BAN: ").append(summary.getBan())
+                                 .append(", Summary: ").append(summary.getSummary())
+                                 .append(", Sentiment: ").append(summary.getSentiment()).append("\n");
+                }
+                prompt = "User says: '" + input + "'\n" +
+                         "Knowledge: " + knowledge + "\n" +
+                         (learnedSolution != null ? "Previously successful solution: " + learnedSolution + "\n" : "") +
+                         (pastSummaries.length() > 0 ? "Past summaries:\n" + pastSummaries.toString() : "") +
+                         "Suggest the next troubleshooting step or question.";
+                break;
+
+            case LLM_AS_A_DRIVER:
+                prompt = "User says: '" + input + "'\n" +
+                         "Fetch context from the web about mobile text troubleshooting and decide the next step or response.";
+                break;
+
+            default:
+                throw new IllegalStateException("Unknown mode: " + effectiveMode);
+        }
+
+        LlmService.LlmResponse response = llmService.generateResponse(prompt, chatHistory);
+        saveToHistory(sessionId, "Agent: " + response.getText());
+
+        if (input != null && (input.toLowerCase().contains("fixed") || input.toLowerCase().contains("working now"))) {
+            learn(sessionId, "text", null, response.getText());
+            return response.getText();
+        }
+
+        return response.getText();
+    }
+
+    @Override
+    public String act(String sessionId, Object decision) {
+        String response = (String) decision;
+        communicate(response);
+        return response;
+    }
+
+    @Override
+    public void communicate(String message) {
+        System.out.println("[TextAgent] " + message);
+    }
+}
+```
+
+#### 11. `BrowseAgent.java`
+```java
+package com.example.dice;
+
+import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.env.Environment;
+import org.springframework.stereotype.Component;
+
+import java.util.List;
+
+@Component
+@RequiredArgsConstructor
+public class BrowseAgent extends IssueAgent {
+    private final KnowledgeService knowledgeService;
+    private final SessionSummaryService sessionSummaryService;
+
+    @Value("${agent.browse.mode:default}")
+    private String agentMode;
+
+    public BrowseAgent(LlmService llmService, ChatHistoryService chatHistoryService, LearningService learningService,
+                       Environment environment, KnowledgeService knowledgeService, SessionSummaryService sessionSummaryService) {
+        super(llmService, chatHistoryService, learningService, environment);
+        this.knowledgeService = knowledgeService;
+        this.sessionSummaryService = sessionSummaryService;
+    }
+
+    @Override
+    protected AgentMode getAgentMode() {
+        return agentMode.equalsIgnoreCase("default") ? null : AgentMode.valueOf(agentMode.toUpperCase());
+    }
+
+    @Override
+    protected String getAgentKey() {
+        return "browse";
+    }
+
+    @Override
+    public Object decide(String sessionId, String input) {
+        List<String> chatHistory = chatHistoryService.getChatHistory(sessionId);
+        ChatHistoryService.AgentState state = chatHistoryService.getAgentState(sessionId, "browse");
+        int stepIndex = state != null ? state.getStepIndex() : 0;
+
+        AgentMode effectiveMode = getEffectiveMode(sessionId, null);
+        String prompt;
+
+        switch (effectiveMode) {
+            case DETERMINISTIC:
+                List<String> steps = knowledgeService.getSteps("browse");
+                if (stepIndex >= steps.size()) {
+                    prompt = "User says: '" + input + "'\nAll steps exhausted. Suggest contacting support.";
+                } else {
+                    String step = steps.get(stepIndex);
+                    prompt = step + "\nUser response: '" + input + "'\nProvide a natural response.";
+                    chatHistoryService.saveAgentState(new ChatHistoryService.AgentState(sessionId, "browse", null, stepIndex + 1, false));
+                }
+                break;
+
+            case AGENT_AS_A_DRIVER:
+                String knowledge = knowledgeService.getKnowledge("browse");
+                String learnedSolution = learningService.getLearnedSolution("browse", null);
+                StringBuilder pastSummaries = new StringBuilder();
+                List<SessionSummaryService.SessionSummary> summaries = sessionSummaryService.getSummariesByBan(getBan(sessionId));
+                for (SessionSummaryService.SessionSummary summary : summaries) {
+                    pastSummaries.append("BAN: ").append(summary.getBan())
+                                 .append(", Summary: ").append(summary.getSummary())
+                                 .append(", Sentiment: ").append(summary.getSentiment()).append("\n");
+                }
+                prompt = "User says: '" + input + "'\n" +
+                         "Knowledge: " + knowledge + "\n" +
+                         (learnedSolution != null ? "Previously successful solution: " + learnedSolution + "\n" : "") +
+                         (pastSummaries.length() > 0 ? "Past summaries:\n" + pastSummaries.toString() : "") +
+                         "Suggest the next troubleshooting step or question.";
+                break;
+
+            case LLM_AS_A_DRIVER:
+                prompt = "User says: '" + input + "'\n" +
+                         "Fetch context from the web about mobile browsing troubleshooting and decide the next step or response.";
+                break;
+
+            default:
+                throw new IllegalStateException("Unknown mode: " + effectiveMode);
+        }
+
+        LlmService.LlmResponse response = llmService.generateResponse(prompt, chatHistory);
+        saveToHistory(sessionId, "Agent: " + response.getText());
+
+        if (input != null && (input.toLowerCase().contains("fixed") || input.toLowerCase().contains("working now"))) {
+            learn(sessionId, "browse", null, response.getText());
+            return response.getText();
+        }
+
+        return response.getText();
+    }
+
+    @Override
+    public String act(String sessionId, Object decision) {
+        String response = (String) decision;
+        communicate(response);
+        return response;
+    }
+
+    @Override
+    public void communicate(String message) {
+        System.out.println("[BrowseAgent] " + message);
+    }
+}
+```
+
+#### 12. `LlmService.java`
+```java
+package com.example.dice;
+
+import com.google.gson.Gson;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.RequiredArgsConstructor;
+import lombok.Setter;
+import okhttp3.*;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
+import java.io.IOException;
+import java.util.List;
+
+@Service
+@RequiredArgsConstructor
+public class LlmService {
+    private final OkHttpClient client = new OkHttpClient();
+    private final Gson gson = new Gson();
+
+    @Value("${llm.api.endpoint}")
+    private String apiEndpoint;
+    @Value("${llm.api.key}")
+    private String apiKey;
+
+    @Getter
+    @Setter
+    @NoArgsConstructor
+    public static class LlmResponse {
+        private String text;
+        private String tool;
+        private String toolInput;
+
+        public LlmResponse(String text, String tool, String toolInput) {
+            this.text = text;
+            this.tool = tool;
+            this.toolInput = toolInput;
+        }
+    }
+
+    public LlmResponse generateResponse(String prompt, List<String> chatHistory) {
+        try {
+            StringBuilder fullPrompt = new StringBuilder();
+            fullPrompt.append("Chat History:\n");
+            for (String message : chatHistory) {
+                fullPrompt.append(message).append("\n");
+            }
+            fullPrompt.append("Current Prompt:\n").append(prompt);
+            fullPrompt.append("\nRespond with JSON: {\"text\": \"response\", \"tool\": \"tool_name\", \"toolInput\": \"input\"} " +
+                              "or leave tool/toolInput null if no tool is needed.");
+
+            RequestBody body = RequestBody.create(fullPrompt.toString(), MediaType.parse("text/plain"));
+            Request request = new Request.Builder()
+                .url(apiEndpoint)
+                .header("Authorization", "Bearer " + apiKey)
+                .post(body)
+                .build();
+
+            try (Response response = client.newCall(request).execute()) {
+                if (!response.isSuccessful()) throw new IOException("Unexpected code " + response);
+                return gson.fromJson(response.body().string(), LlmResponse.class);
+            }
+        } catch (IOException e) {
+            System.err.println("LLM API error: " + e.getMessage());
+            return new LlmResponse("Sorry, I couldn’t process that.", null, null);
+        }
+    }
+
+    public String generateSessionSummary(List<String> chatHistory) {
+        StringBuilder prompt = new StringBuilder();
+        prompt.append("Chat History:\n");
+        for (String message : chatHistory) {
+            prompt.append(message).append("\n");
+        }
+        prompt.append("Generate a summary of this session including:\n" +
+                      "- Steps performed and their effectiveness (effective/ineffective).\n" +
+                      "- Customer sentiment at the end (positive, negative, neutral).\n" +
+                      "Return in JSON: {\"summary\": \"steps and effectiveness\", \"sentiment\": \"sentiment\"}");
+
+        try {
+            RequestBody body = RequestBody.create(prompt.toString(), MediaType.parse("text/plain"));
+            Request request = new Request.Builder()
+                .url(apiEndpoint)
+                .header("Authorization", "Bearer " + apiKey)
+                .post(body)
+                .build();
+
+            try (Response response = client.newCall(request).execute()) {
+                if (!response.isSuccessful()) throw new IOException("Unexpected code " + response);
+                return response.body().string();
+            }
+        } catch (IOException e) {
+            System.err.println("LLM summary error: " + e.getMessage());
+            return "{\"summary\": \"Error generating summary\", \"sentiment\": \"neutral\"}";
+        }
+    }
+}
+```
+
+#### 13. `ChatHistoryService.java`
+```java
+package com.example.dice;
+
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.RequiredArgsConstructor;
+import lombok.Setter;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.stereotype.Service;
+
+import java.util.List;
+import java.util.stream.Collectors;
+
+@Service
+@RequiredArgsConstructor
+public class ChatHistoryService {
+    private final MongoTemplate mongoTemplate;
+
+    @Getter
+    @Setter
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class ChatMessage {
+        private String sessionId;
+        private String message;
+    }
+
+    @Getter
+    @Setter
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class AgentState {
+        private String sessionId;
+        private String agentKey;
+        private String subFlow;
+        private int stepIndex;
+        private boolean completed;
+    }
+
+    @Getter
+    @Setter
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class OrchestratorState {
+        private String diceSessionId;
+        private String olSessionId;
+        private String ban;
+        private String currentAgentKey;
+        private boolean active;
+    }
+
+    public List<String> getChatHistory(String sessionId) {
+        Query query = new Query(Criteria.where("sessionId").is(sessionId));
+        return mongoTemplate.find(query, ChatMessage.class, "chat_history")
+            .stream()
+            .map(ChatMessage::getMessage)
+            .collect(Collectors.toList());
+    }
+
+    public void saveChatHistory(String sessionId, String message) {
+        mongoTemplate.save(new ChatMessage(sessionId, message), "chat_history");
+    }
+
+    public AgentState getAgentState(String sessionId, String agentKey) {
+        Query query = new Query(Criteria.where("sessionId").is(sessionId).and("agentKey").is(agentKey));
+        return mongoTemplate.findOne(query, AgentState.class, "agent_state");
+    }
+
+    public void saveAgentState(AgentState state) {
+        mongoTemplate.save(state, "agent_state");
+    }
+
+    public OrchestratorState getOrchestratorState(String diceSessionId) {
+        Query query = new Query(Criteria.where("diceSessionId").is(diceSessionId));
+        return mongoTemplate.findOne(query, OrchestratorState.class, "orchestrator_state");
+    }
+
+    public void saveOrchestratorState(OrchestratorState state) {
+        mongoTemplate.save(state, "orchestrator_state");
+    }
+}
+```
+
+#### 14. `KnowledgeService.java`
+```java
+package com.example.dice;
+
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Service;
+
+import javax.annotation.PostConstruct;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+@Service
+@RequiredArgsConstructor
+public class KnowledgeService {
+    private final Map<String, List<String>> knowledgeSteps = new HashMap<>();
+
+    @PostConstruct
+    public void init() {
+        knowledgeSteps.put("call", List.of(
+            "Ask if the user has checked their signal strength.",
+            "Suggest restarting the phone.",
+            "Suggest checking if airplane mode is on.",
+            "Suggest verifying the SIM card is inserted correctly."
+        ));
+        knowledgeSteps.put("text", List.of(
+            "Ask if the user has checked SMS settings.",
+            "Suggest restarting the phone.",
+            "Confirm sufficient credit or plan allowance."
+        ));
+        knowledgeSteps.put("browse", List.of(
+            "Ask if the user has checked their data plan status.",
+            "Suggest toggling mobile data off and on.",
+            "Suggest restarting the phone."
+        ));
+    }
+
+    public List<String> getSteps(String flowIdentifier) {
+        return knowledgeSteps.getOrDefault(flowIdentifier, List.of("No steps available."));
+    }
+
+    public String getKnowledge(String flowIdentifier) {
+        return String.join("\n", knowledgeSteps.getOrDefault(flowIdentifier, List.of("No knowledge available.")));
+    }
+}
+```
+
+#### 15. `LearningService.java`
+```java
+package com.example.dice;
+
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.RequiredArgsConstructor;
+import lombok.Setter;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.stereotype.Service;
+
+@Service
+@RequiredArgsConstructor
+public class LearningService {
+    private final MongoTemplate mongoTemplate;
+
+    @Getter
+    @Setter
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class LearnedOutcome {
+        private String issue;
+        private String subFlow;
+        private String solution;
+        private int successCount;
+    }
+
+    public void recordSuccess(String issue, String subFlow, String solution) {
+        Query query = new Query(Criteria.where("issue").is(issue).and("subFlow").is(subFlow).and("solution").is(solution));
+        LearnedOutcome outcome = mongoTemplate.findOne(query, LearnedOutcome.class, "learned_outcomes");
+        if (outcome == null) {
+            outcome = new LearnedOutcome(issue, subFlow, solution, 1);
+        } else {
+            outcome.successCount++;
+        }
+        mongoTemplate.save(outcome, "learned_outcomes");
+    }
+
+    public String getLearnedSolution(String issue, String subFlow) {
+        Query query = new Query(Criteria.where("issue").is(issue).and("subFlow").is(subFlow))
+            .sort().on("successCount", -1);
+        LearnedOutcome outcome = mongoTemplate.findOne(query, LearnedOutcome.class, "learned_outcomes");
+        return outcome != null ? outcome.getSolution() : null;
+    }
+}
+```
+
+#### 16. `SessionSummaryService.java`
+```java
+package com.example.dice;
+
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.RequiredArgsConstructor;
+import lombok.Setter;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.stereotype.Service;
+
+import java.util.List;
+
+@Service
+@RequiredArgsConstructor
+public class SessionSummaryService {
+    private final MongoTemplate mongoTemplate;
+
+    @Getter
+    @Setter
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class SessionSummary {
+        private String olSessionId;
+        private String diceSessionId;
+        private String ban;
+        private String summary;
+        private String sentiment;
+    }
+
+    public void saveSessionSummary(String olSessionId, String diceSessionId, String ban, String summary, String sentiment) {
+        mongoTemplate.save(new SessionSummary(olSessionId, diceSessionId, ban, summary, sentiment), "session_summaries");
+    }
+
+    public List<SessionSummary> getSummariesByBan(String ban) {
+        Query query = new Query(Criteria.where("ban").is(ban));
+        return mongoTemplate.find(query, SessionSummary.class, "session_summaries");
+    }
+}
+```
+
+#### 17. `NetworkStatusTool.java`
+```java
+package com.example.dice;
+
+import lombok.RequiredArgsConstructor;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+
+import java.io.IOException;
+
+@Component
+@RequiredArgsConstructor
+public class NetworkStatusTool implements AgentTool {
+    private final OkHttpClient client = new OkHttpClient();
+
+    @Value("${network.api.endpoint}")
+    private String apiEndpoint;
+    @Value("${network.api.key}")
+    private String apiKey;
+
+    @Override
+    public String execute(String input) throws IOException {
+        Request request = new Request.Builder()
+            .url(apiEndpoint + "?phoneNumber=" + input)
+            .header("Authorization", "Bearer " + apiKey)
+            .get()
+            .build();
+
+        try (Response response = client.newCall(request).execute()) {
+            if (!response.isSuccessful()) {
+                return "Error: Unable to check network status.";
+            }
+            return response.body().string();
+        }
+    }
+}
+```
+
+#### 18. `AgentTool.java`
+```java
+package com.example.dice;
+
+import java.io.IOException;
+
+public interface AgentTool {
+    String execute(String input) throws IOException;
+}
+```
+
+---
+
+### `application.properties`
+```properties
+spring.data.mongodb.uri=mongodb://localhost:27017/dice_db
+spring.data.mongodb.database=dice_db
+
+llm.api.endpoint=http://your-internal-api/llm
+llm.api.key=your-internal-api-key
+network.api.endpoint=http://your-network-api/status
+network.api.key=your-network-api-key
+
+agent.default.mode=LLM_AS_A_DRIVER
+agent.call.mode=
+agent.call.cant_make_calls.mode=DETERMINISTIC
+agent.call.cant_receive_calls.mode=AGENT_AS_A_DRIVER
+agent.call.dropped_calls.mode=LLM_AS_A_DRIVER
+agent.text.mode=
+agent.browse.mode=
+```
+
+---
+
+### Key Changes
+1. **Stateless Design**:
+   - Removed instance variables (`currentStepIndex`, `currentSubFlow`, `active`) from agents.
+   - State is fetched from MongoDB (`ChatHistoryService.AgentState`) on each `decide` call and updated after processing.
+   - `OrchestratorAgent` no longer holds `diceSessionId` as an instance variable; it’s passed via method parameters.
+
+2. **Singleton Scope**:
+   - Removed `@Scope("prototype")` from `CallAgent`, `TextAgent`, and `BrowseAgent`. They are now singletons (default Spring scope).
+   - `AgentFactory` returns singleton instances, relying on `diceSessionId` to fetch state.
+
+3. **Method Signatures**:
+   - Updated `decide`, `act`, `isActive`, and `learn` to take `sessionId` as a parameter, ensuring stateless operation.
+
+4. **State Management**:
+   - All state is stored in MongoDB (`agent_state` for agents, `orchestrator_state` for orchestrator).
+   - No in-memory session tracking (`activeSessions` Map removed previously).
+
+---
+
+### How It Works
+- **Session Start (`/engage`)**:
+  - Generates `diceSessionId`, saves initial `OrchestratorState`, and calls `startSession`.
+  - Agent retrieves state from MongoDB and processes the first step.
+- **Session Continuation (`/next`)**:
+  - Reconstructs state from MongoDB using `diceSessionId`, processes input, and updates state.
+- **Mode Resolution**: 
+  - Remains the same, using `getEffectiveMode` with MongoDB state (`subFlow`).
+
+#### Example Flow
+```
+POST /dice/engage
+{"olSessionId": "client123", "flowIdentifier": "call", "ban": "BAN123"}
+Response: "Session started. diceSessionId: dice_uuid\nWhich issue: can’t make calls, can’t receive calls, or dropped calls?"
+
+POST /dice/next
+{"olSessionId": "client123", "diceSessionId": "dice_uuid", "userInput": "Can’t make calls", "ban": "BAN123"}
+Response: "Ask if the user has checked their signal strength." (DETERMINISTIC mode)
+```
+
+---
+
+### Notes
+- **Scalability**: Fully stateless, ideal for Kubernetes with horizontal scaling. Consider Redis caching for MongoDB reads if latency becomes an issue.
+- **Dependencies**: No prototype beans; all classes are singletons.
+- **Web Context**: `LLM_AS_A_DRIVER` still simulates web fetching; integrate a real API if needed.
+
+This is the complete stateless solution with singleton beans. Let me know if you need further refinements!
