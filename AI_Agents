@@ -1,0 +1,7 @@
+AI agent
+
+If you split out the data ingestion and retrieval part, and the task orchestration part, 
+many of the examples are basically research, summarization, refinement/revisions, and publishing new content.
+
+https://arxiv.org/pdf/2408.08435
+
