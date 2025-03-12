@@ -1,0 +1,227 @@
+You are an expert Software Architect and expert in Spring AI and Spring Boot framework.
+Design and generate code to satisfy these requirements.
+
+Enhance the solution to include Prompt Building Framework.
+
+As an expert Java programmer, I’ll guide you through integrating an OAuth2 REST client with the Spring AI `ChatClient` in a Spring Boot application. This integration allows you to securely interact with an AI model (like OpenAI or another LLM provider) that requires OAuth2 authentication for API access. I’ll assume you’re using Spring Boot with Spring AI and Spring Security OAuth2 dependencies, and I’ll provide a practical, step-by-step approach based on my up-to-date knowledge as of March 11, 2025.
+
+---
+
+### Overview
+
+The Spring AI `ChatClient` provides a fluent API to interact with AI models, but it doesn’t natively handle OAuth2 authentication for the underlying HTTP requests. To integrate OAuth2, you’ll need to:
+1. Configure an OAuth2-protected REST client using Spring Security’s `RestClient` or `WebClient`.
+2. Use this client to authenticate and fetch an access token.
+3. Pass the token to the Spring AI `ChatClient` by customizing its underlying HTTP client (typically an `OkHttpClient` or `RestTemplate`).
+
+Since Spring AI’s `ChatClient` relies on a `ChatModel` (e.g., `OpenAiChatModel`), we’ll focus on customizing the HTTP client used by the `ChatModel` to include OAuth2 authentication.
+
+---
+
+### Prerequisites
+
+- A Spring Boot application with the following dependencies in your `pom.xml`:
+  ```xml
+  <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+  </dependency>
+  <dependency>
+      <groupId>org.springframework.ai</groupId>
+      <artifactId>spring-ai-openai-spring-boot-starter</artifactId>
+      <version>1.0.0-SNAPSHOT</version> <!-- Use the latest version -->
+  </dependency>
+  <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-oauth2-client</artifactId>
+  </dependency>
+  ```
+- An OAuth2 provider (e.g., Keycloak, Okta, or an in-house authorization server) with a registered client (client ID, secret, token endpoint, etc.).
+- Basic knowledge of Spring Security OAuth2 and Spring AI.
+
+---
+
+### Step-by-Step Integration
+
+#### 1. Configure OAuth2 in Spring Boot
+
+First, configure your OAuth2 client credentials in `application.yml` (or `.properties`). This example uses the `client_credentials` grant type, suitable for server-to-server communication with an AI API.
+
+```yaml
+spring:
+  security:
+    oauth2:
+      client:
+        registration:
+          ai-service:
+            provider: custom-provider
+            client-id: your-client-id
+            client-secret: your-client-secret
+            authorization-grant-type: client_credentials
+            scope: ai.read
+        provider:
+          custom-provider:
+            token-uri: https://your-auth-server/oauth2/token
+```
+
+- `ai-service`: A unique registration ID for your OAuth2 client.
+- `token-uri`: The endpoint where the access token is fetched.
+
+Spring Security will automatically manage token retrieval and renewal using this configuration.
+
+#### 2. Create an OAuth2-Protected RestClient
+
+Spring Security 6.1+ provides `RestClient` (a synchronous HTTP client) with built-in OAuth2 support. We’ll configure it to handle token acquisition and attach the token to requests.
+
+```java
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.oauth2.client.OAuth2AuthorizedClientManager;
+import org.springframework.security.oauth2.client.OAuth2AuthorizedClientProvider;
+import org.springframework.security.oauth2.client.OAuth2AuthorizedClientProviderBuilder;
+import org.springframework.security.oauth2.client.registration.ClientRegistrationRepository;
+import org.springframework.security.oauth2.client.web.DefaultOAuth2AuthorizedClientManager;
+import org.springframework.security.oauth2.client.web.OAuth2AuthorizedClientRepository;
+import org.springframework.web.client.RestClient;
+
+@Configuration
+public class OAuth2Config {
+
+    @Bean
+    public OAuth2AuthorizedClientManager authorizedClientManager(
+            ClientRegistrationRepository clientRegistrationRepository,
+            OAuth2AuthorizedClientRepository authorizedClientRepository) {
+        OAuth2AuthorizedClientProvider authorizedClientProvider =
+                OAuth2AuthorizedClientProviderBuilder.builder()
+                        .clientCredentials()
+                        .build();
+
+        DefaultOAuth2AuthorizedClientManager authorizedClientManager =
+                new DefaultOAuth2AuthorizedClientManager(clientRegistrationRepository, authorizedClientRepository);
+        authorizedClientManager.setAuthorizedClientProvider(authorizedClientProvider);
+        return authorizedClientManager;
+    }
+
+    @Bean
+    public RestClient oauth2RestClient(OAuth2AuthorizedClientManager authorizedClientManager) {
+        return RestClient.builder()
+                .requestInterceptor((request, body, execution) -> {
+                    var client = authorizedClientManager.authorize(
+                            OAuth2AuthorizeRequest.withClientRegistrationId("ai-service").build());
+                    String token = client.getAccessToken().getTokenValue();
+                    request.getHeaders().setBearerAuth(token);
+                    return execution.execute(request, body);
+                })
+                .build();
+    }
+}
+```
+
+- `OAuth2AuthorizedClientManager`: Manages token acquisition and refresh.
+- `RestClient`: Intercepts requests and adds the `Authorization: Bearer` header with the OAuth2 token.
+
+#### 3. Customize the Spring AI ChatModel with the OAuth2 RestClient
+
+The `OpenAiChatModel` (or other `ChatModel` implementations) in Spring AI uses an `ApiClient` (typically based on `OkHttpClient`) under the hood. We’ll customize it to use our OAuth2-protected `RestClient`.
+
+```java
+import org.springframework.ai.openai.OpenAiChatModel;
+import org.springframework.ai.openai.api.OpenAiApi;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.web.client.RestClient;
+
+@Configuration
+public class AiConfig {
+
+    @Bean
+    public OpenAiChatModel chatModel(RestClient oauth2RestClient) {
+        OpenAiApi openAiApi = new OpenAiApi(
+                "https://your-ai-api-base-url", // Replace with your AI API base URL
+                "", // Token not needed here; handled by RestClient
+                oauth2RestClient
+        );
+        return new OpenAiChatModel(openAiApi);
+    }
+
+    @Bean
+    public ChatClient chatClient(ChatClient.Builder chatClientBuilder, OpenAiChatModel chatModel) {
+        return chatClientBuilder
+                .defaultModel(chatModel)
+                .build();
+    }
+}
+```
+
+- `OpenAiApi`: Accepts a custom `RestClient` for HTTP requests.
+- `ChatClient`: Built with the customized `ChatModel`.
+
+#### 4. Use the ChatClient in Your Application
+
+Now, you can inject and use the `ChatClient` as usual, and it will automatically handle OAuth2 authentication for AI API calls.
+
+```java
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class AiController {
+
+    private final ChatClient chatClient;
+
+    public AiController(ChatClient chatClient) {
+        this.chatClient = chatClient;
+    }
+
+    @GetMapping("/ai")
+    public String generateResponse(@RequestParam String prompt) {
+        return chatClient.prompt()
+                .user(prompt)
+                .call()
+                .content();
+    }
+}
+```
+
+- Send a GET request to `/ai?prompt=Hello, how are you?`, and the `ChatClient` will use the OAuth2-authenticated `RestClient` to call the AI API.
+
+---
+
+### How It Works
+
+1. **OAuth2 Token Acquisition**: The `OAuth2AuthorizedClientManager` fetches an access token using the `client_credentials` grant type when the `RestClient` makes a request.
+2. **Request Interception**: The `RestClient` interceptor adds the `Bearer` token to the `Authorization` header.
+3. **Spring AI Integration**: The `OpenAiApi` uses this `RestClient` to send authenticated requests to the AI service.
+4. **ChatClient Usage**: The `ChatClient` interacts with the `ChatModel`, oblivious to the OAuth2 details, providing a clean API for your application.
+
+---
+
+### Benefits
+
+- **Security**: OAuth2 ensures secure access to the AI API with token-based authentication.
+- **Separation of Concerns**: Spring Security handles token management, while Spring AI focuses on AI interactions.
+- **Scalability**: Easily extend to other grant types (e.g., `authorization_code`) or providers by adjusting the configuration.
+- **Maintainability**: Centralized OAuth2 configuration in `application.yml` and reusable `RestClient`.
+
+---
+
+### Additional Considerations
+
+- **Reactive Option**: If you prefer a reactive stack, replace `RestClient` with `WebClient` and use `ReactiveOAuth2AuthorizedClientManager`. The setup is similar, but you’d adjust the `ChatModel` to use a reactive client.
+- **Error Handling**: Add try-catch blocks around `authorizedClientManager.authorize()` to handle token fetch failures (e.g., invalid credentials).
+- **Token Refresh**: The `client_credentials` grant typically provides short-lived tokens; Spring Security refreshes them automatically via the `OAuth2AuthorizedClientManager`.
+- **Custom AI APIs**: If your AI provider isn’t OpenAI, adjust the `OpenAiApi` instantiation to match your provider’s API client library, ensuring it accepts a `RestClient`.
+
+---
+
+### Example Run
+
+1. Start your Spring Boot app.
+2. Call `curl http://localhost:8080/ai?prompt=Tell%20me%20a%20joke`.
+3. The app fetches an OAuth2 token, sends it to the AI API, and returns a response like: `"Why don't skeletons fight each other? Because they don't have the guts!"`
+
+---
+
+This integration combines the power of Spring AI’s `ChatClient` with Spring Security’s OAuth2 capabilities, providing a robust, secure solution for AI-driven applications. Let me know if you need further clarification or help with a specific OAuth2 provider!
