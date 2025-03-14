@@ -1,0 +1,189 @@
+If your HTTP request and response bodies are showing as `[FILTERED]` in the logs, this is likely due to the default behavior of the Azure SDK or the underlying HTTP client (e.g., `reactor-netty` or `okhttp`) redacting sensitive information for security reasons. To see the full request and response bodies printed in your logs, you need to configure the logging settings to disable this filtering or increase verbosity. Here’s how you can achieve this:
+
+---
+
+### Why This Happens
+- The Azure SDK (`com.azure.core.http`) and Spring Boot’s default logging (via SLF4J/Logback) often filter sensitive data like request/response bodies, headers (e.g., `Authorization`), or payloads to prevent logging secrets or large data by default.
+- The `[FILTERED]` placeholder indicates that the content is intentionally hidden unless explicitly enabled.
+
+---
+
+### Steps to Show Full Request and Response Bodies
+
+#### 1. Adjust Logging Levels
+Ensure you’ve set the appropriate logging levels to capture HTTP details. Add or update these in your `application.properties` (or `application.yml`):
+
+```properties
+logging.level.com.azure=DEBUG
+logging.level.com.azure.core.http=TRACE
+logging.level.reactor.netty.http.client=DEBUG
+logging.level.org.springframework.web=DEBUG
+```
+
+- `com.azure.core.http=TRACE`: Logs raw HTTP traffic.
+- `reactor.netty.http.client=DEBUG`: Logs network-level details if the Azure SDK uses Reactor Netty.
+
+#### 2. Configure Azure SDK to Log Full Bodies
+The Azure SDK’s HTTP client might redact bodies by default. To disable this, you can customize the `OpenAIClient` with a logging policy:
+
+```java
+import com.azure.ai.openai.OpenAIClient;
+import com.azure.ai.openai.OpenAIClientBuilder;
+import com.azure.core.credential.TokenCredential;
+import com.azure.core.http.HttpPipeline;
+import com.azure.core.http.HttpPipelineBuilder;
+import com.azure.core.http.policy.HttpLogDetailLevel;
+import com.azure.core.http.policy.HttpLogOptions;
+import com.azure.identity.ClientSecretCredentialBuilder;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class AzureOpenAIConfig {
+
+    @Bean
+    public TokenCredential tokenCredential() {
+        return new ClientSecretCredentialBuilder()
+                .clientId("YOUR_CLIENT_ID")
+                .clientSecret("YOUR_CLIENT_SECRET")
+                .tenantId("YOUR_TENANT_ID")
+                .build();
+    }
+
+    @Bean
+    public OpenAIClient openAIClient(TokenCredential tokenCredential) {
+        // Configure logging to include bodies
+        HttpLogOptions logOptions = new HttpLogOptions()
+                .setLogLevel(HttpLogDetailLevel.BODY_AND_HEADERS); // Log full request/response including bodies
+
+        HttpPipeline pipeline = new HttpPipelineBuilder()
+                .policies(new AzureIdentityCredentialPolicy(tokenCredential)) // Custom policy if needed
+                .httpClient(new NettyAsyncHttpClientBuilder().build())
+                .build();
+
+        return new OpenAIClientBuilder()
+                .endpoint("https://your-resource-name.openai.azure.com/")
+                .pipeline(pipeline) // Use custom pipeline with logging
+                .httpLogOptions(logOptions) // Enable detailed logging
+                .credential(tokenCredential)
+                .buildClient();
+    }
+}
+```
+
+- **`HttpLogDetailLevel.BODY_AND_HEADERS`**: This logs both headers and bodies without filtering.
+- **Custom Pipeline**: Optional if you need more control, but the `httpLogOptions` alone should suffice.
+
+#### 3. Update Logback Configuration (Spring Boot)
+If you’re using Spring Boot with Logback (default logging framework), the `[FILTERED]` might come from Logback’s redaction. Create or edit `src/main/resources/logback-spring.xml`:
+
+```xml
+<configuration>
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss} %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- Azure SDK logging -->
+    <logger name="com.azure" level="DEBUG" additivity="false">
+        <appender-ref ref="CONSOLE"/>
+    </logger>
+    <logger name="com.azure.core.http" level="TRACE" additivity="false">
+        <appender-ref ref="CONSOLE"/>
+    </logger>
+
+    <!-- Reactor Netty logging -->
+    <logger name="reactor.netty.http.client" level="DEBUG" additivity="false">
+        <appender-ref ref="CONSOLE"/>
+    </logger>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+</configuration>
+```
+
+- **No Filtering**: This setup doesn’t apply any filters, so bodies should appear in full.
+
+#### 4. Test and Verify
+- Restart your application.
+- Call your `/chat` endpoint (e.g., `curl "http://localhost:8080/chat?userMessage=Hello"`).
+- Check the logs for output like:
+  ```
+  TRACE [http-nio-8080-exec-1] com.azure.core.http - Request: POST https://your-resource-name.openai.azure.com/openai/deployments/your-deployment-name/chat/completions?api-version=2023-05-15
+  TRACE [http-nio-8080-exec-1] com.azure.core.http - Request Body: {"messages":[{"role":"system","content":"You are a helpful assistant..."},{"role":"user","content":"Hello"}],"max_tokens":100,"temperature":0.7}
+  TRACE [http-nio-8080-exec-1] com.azure.core.http - Response: 200 OK
+  TRACE [http-nio-8080-exec-1] com.azure.core.http - Response Body: {"id":"chatcmpl-...","object":"chat.completion","created":...,"choices":[{"message":{"role":"assistant","content":"Hi! How can I assist you today?"},...}]}
+  ```
+
+#### 5. Alternative: Debug with a Custom Interceptor
+If logs still show `[FILTERED]`, intercept the HTTP request/response manually:
+
+```java
+import com.azure.core.http.HttpClient;
+import com.azure.core.http.netty.NettyAsyncHttpClientBuilder;
+import com.azure.core.http.policy.HttpPipelinePolicy;
+import com.azure.core.http.HttpRequest;
+import com.azure.core.http.HttpResponse;
+import reactor.core.publisher.Mono;
+
+public class LoggingPolicy implements HttpPipelinePolicy {
+    @Override
+    public Mono<HttpResponse> process(HttpPipelineCallContext context, HttpPipelineNextPolicy next) {
+        HttpRequest request = context.getHttpRequest();
+        System.out.println("Request URL: " + request.getUrl());
+        System.out.println("Request Body: " + request.getBodyAsString().block());
+
+        return next.process().map(response -> {
+            System.out.println("Response Status: " + response.getStatusCode());
+            System.out.println("Response Body: " + response.getBodyAsString().block());
+            return response;
+        });
+    }
+}
+
+@Configuration
+public class AzureOpenAIConfig {
+    @Bean
+    public OpenAIClient openAIClient(TokenCredential tokenCredential) {
+        HttpClient httpClient = new NettyAsyncHttpClientBuilder().build();
+        HttpPipeline pipeline = new HttpPipelineBuilder()
+                .httpClient(httpClient)
+                .policies(new LoggingPolicy()) // Add custom logging policy
+                .build();
+
+        return new OpenAIClientBuilder()
+                .endpoint("https://your-resource-name.openai.azure.com/")
+                .pipeline(pipeline)
+                .credential(tokenCredential)
+                .buildClient();
+    }
+}
+```
+
+- **Output**: Prints to `System.out`, bypassing Logback filtering.
+
+---
+
+### Notes
+- **Performance**: Logging full bodies can generate large outputs, so use this for debugging only.
+- **Security**: Avoid logging in production if sensitive data (e.g., tokens) is included unless redacted.
+- **Dependencies**: Ensure you have:
+  ```groovy
+  implementation 'com.azure:azure-ai-openai:1.0.0-beta.6'
+  implementation 'io.projectreactor.netty:reactor-netty-http:1.1.15' // Or compatible version
+  ```
+
+---
+
+### Expected Log Output
+With the above changes, you should see:
+```
+TRACE [http-nio-8080-exec-1] com.azure.core.http - Request: POST https://your-resource-name.openai.azure.com/openai/deployments/your-deployment-name/chat/completions?api-version=2023-05-15
+TRACE [http-nio-8080-exec-1] com.azure.core.http - Request Body: {"messages":[{"role":"system","content":"You are a helpful assistant designed to provide accurate and friendly responses."},{"role":"user","content":"Hello"}],"max_tokens":100,"temperature":0.7}
+TRACE [http-nio-8080-exec-1] com.azure.core.http - Response: 200 OK
+TRACE [http-nio-8080-exec-1] com.azure.core.http - Response Body: {"id":"chatcmpl-123","object":"chat.completion","created":1612345678,"choices":[{"index":0,"message":{"role":"assistant","content":"Hi! How can I assist you today?"},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":10,"total_tokens":30}}
+```
+
+If it’s still filtered, share your current log output or `build.gradle`, and I’ll refine the solution further!
