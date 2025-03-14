@@ -1,0 +1,182 @@
+I’m glad we resolved the 404 issue by switching from `getCompletions` to `getChatCompletions`—the `/chat/` path was indeed the key for Azure OpenAI’s chat models like `gpt-4o`. Now, let’s create a complete example for the `getChatCompletions` API using the Azure OpenAI SDK in Java, incorporating both **system** and **user** messages.
+
+The `getChatCompletions` method allows you to pass a list of `ChatRequestMessage` objects, where each message has a role (e.g., `system`, `user`, `assistant`) and content. Below is the code to achieve this.
+
+---
+
+### Example Code for `getChatCompletions` with System and User Messages
+
+Here’s a full working example, including configuration, the API call, and a REST endpoint to test it:
+
+#### 1. Configuration (Already Working for You)
+Assuming your `OpenAIClient` setup with `TokenCredential` is functional:
+
+```java
+import com.azure.ai.openai.OpenAIClient;
+import com.azure.ai.openai.OpenAIClientBuilder;
+import com.azure.core.credential.TokenCredential;
+import com.azure.identity.ClientSecretCredentialBuilder;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class AzureOpenAIConfig {
+
+    @Bean
+    public TokenCredential tokenCredential() {
+        return new ClientSecretCredentialBuilder()
+                .clientId("YOUR_CLIENT_ID")
+                .clientSecret("YOUR_CLIENT_SECRET")
+                .tenantId("YOUR_TENANT_ID")
+                .build();
+    }
+
+    @Bean
+    public OpenAIClient openAIClient(TokenCredential tokenCredential) {
+        return new OpenAIClientBuilder()
+                .endpoint("https://your-resource-name.openai.azure.com/")
+                .credential(tokenCredential)
+                .buildClient();
+    }
+}
+```
+
+#### 2. Controller with `getChatCompletions`
+This example includes a REST endpoint that accepts a user message and combines it with a system message:
+
+```java
+import com.azure.ai.openai.OpenAIClient;
+import com.azure.ai.openai.models.ChatCompletions;
+import com.azure.ai.openai.models.ChatCompletionsOptions;
+import com.azure.ai.openai.models.ChatRequestMessage;
+import com.azure.ai.openai.models.ChatRole;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.util.Arrays;
+import java.util.List;
+
+@RestController
+public class ChatController {
+    private final OpenAIClient openAIClient;
+
+    public ChatController(OpenAIClient openAIClient) {
+        this.openAIClient = openAIClient;
+    }
+
+    @GetMapping("/chat")
+    public String chat(@RequestParam String userMessage) {
+        // Define system and user messages
+        ChatRequestMessage systemMessage = new ChatRequestMessage(
+            ChatRole.SYSTEM,
+            "You are a helpful assistant designed to provide accurate and friendly responses."
+        );
+        ChatRequestMessage userMsg = new ChatRequestMessage(
+            ChatRole.USER,
+            userMessage
+        );
+
+        // Combine messages into a list
+        List<ChatRequestMessage> messages = Arrays.asList(systemMessage, userMsg);
+
+        // Configure chat completions options
+        ChatCompletionsOptions options = new ChatCompletionsOptions(messages)
+            .setMaxTokens(100)  // Limit response length
+            .setTemperature(0.7);  // Control creativity
+
+        try {
+            // Call getChatCompletions
+            ChatCompletions completions = openAIClient.getChatCompletions("your-deployment-name", options);
+            // Return the first choice's message content
+            return completions.getChoices().get(0).getMessage().getContent();
+        } catch (Exception e) {
+            return "Error: " + e.getMessage();
+        }
+    }
+}
+```
+
+---
+
+### Explanation
+1. **Messages**:
+   - **System Message**: Sets the assistant’s behavior or context (e.g., "You are a helpful assistant"). Uses `ChatRole.SYSTEM`.
+   - **User Message**: The input from the user, passed via the `@RequestParam`. Uses `ChatRole.USER`.
+   - Combined into a `List<ChatRequestMessage>` for the API call.
+
+2. **ChatCompletionsOptions**:
+   - Takes the list of messages as its primary input.
+   - Optional settings like `maxTokens` (limits response length) and `temperature` (controls randomness) are added for customization.
+
+3. **API Call**:
+   - `getChatCompletions("your-deployment-name", options)` sends the request to Azure OpenAI.
+   - Replace `"your-deployment-name"` with your actual deployment name from the Azure Portal.
+
+4. **Response**:
+   - `completions.getChoices().get(0).getMessage().getContent()` extracts the assistant’s reply.
+
+---
+
+### Testing the Endpoint
+- **URL**: `http://localhost:8080/chat?userMessage=Hello,%20how%20are%20you?`
+- **Expected Response**: Something like `"Hi! I'm doing great, thanks for asking. How can I assist you today?"` (depending on the model’s output).
+
+---
+
+### Additional Options
+You can enhance the `ChatCompletionsOptions` with more settings:
+```java
+ChatCompletionsOptions options = new ChatCompletionsOptions(messages)
+    .setMaxTokens(150)           // Maximum tokens in the response
+    .setTemperature(0.9)         // Higher for more creative responses
+    .setTopP(1.0)               // Nucleus sampling
+    .setPresencePenalty(0.0)     // Encourage new topics
+    .setFrequencyPenalty(0.0);   // Reduce repetition
+```
+
+---
+
+### Full URL Being Hit
+With this setup, the Azure OpenAI SDK will construct a URL like:
+```
+https://your-resource-name.openai.azure.com/openai/deployments/your-deployment-name/chat/completions?api-version=2023-05-15
+```
+- The `api-version` is typically set by the SDK (e.g., `2023-05-15` or newer). If you need a specific version, check the SDK docs or logs to confirm.
+
+---
+
+### Verifying It Works
+- **Enable Logging**: Add to `application.properties` if not already present:
+  ```properties
+  logging.level.com.azure=DEBUG
+  logging.level.com.azure.core.http=TRACE
+  ```
+- Look for a `200 OK` response in the logs:
+  ```
+  TRACE [http-nio-8080-exec-1] com.azure.core.http - Response: 200 OK
+  ```
+
+- **Test**: Hit the endpoint with curl or a browser:
+  ```bash
+  curl "http://localhost:8080/chat?userMessage=What%20is%20the%20weather%20like?"
+  ```
+
+---
+
+### If You Want to Match Python Exactly
+Your Python code uses `client.chat.completions.create()` with a `messages` parameter:
+```python
+response = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Hello"}
+    ]
+)
+```
+The Java equivalent above mirrors this structure perfectly.
+
+---
+
+Let me know if you need further tweaks or additional features (e.g., handling multiple choices, streaming responses, etc.)!
