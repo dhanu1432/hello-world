@@ -1,0 +1,204 @@
+You’re correct to point out that `ClientSecretCredentialBuilder` does not have a `.scope()` method directly. I apologize for the confusion in my previous response—my suggestion was based on a misunderstanding of the `ClientSecretCredentialBuilder` API. In the Azure Identity SDK (`com.azure.identity`), the `ClientSecretCredentialBuilder` doesn’t allow you to set the scope at construction time because the scope is specified later when the credential is used to request a token (e.g., via `TokenCredential.getToken()`).
+
+Instead, the scope is typically passed when the `TokenCredential` is invoked by the Azure SDK’s HTTP pipeline during the authentication process. For the Azure OpenAI SDK (`com.azure.ai.openai`), this happens internally when the `OpenAIClient` makes requests. If the default scope (`https://cognitiveservices.azure.com/.default`) is incorrect, we need to ensure the correct scope is applied at the token request level, which requires adjusting how the credential is used or customizing the HTTP pipeline.
+
+Let’s fix this properly.
+
+---
+
+### Why This Happens
+- **`ClientSecretCredential`**: This credential type fetches an access token from Microsoft Entra ID using the client credentials flow. The scope is passed when calling `getToken()` (e.g., `credential.getToken(new TokenRequestContext().addScopes("scope"))`), not during credential construction.
+- **Azure OpenAI SDK**: The `OpenAIClient` uses the `TokenCredential` internally and requests a token with a scope it determines (defaulting to `https://cognitiveservices.azure.com/.default` in your case).
+- **Incorrect Scope**: If your Azure OpenAI resource expects a different scope (e.g., a custom `api://<app-id>/.default`), the default scope causes an "invalid JWT token" error.
+
+---
+
+### Solution: Set the Scope via HTTP Pipeline
+Since `ClientSecretCredentialBuilder` doesn’t set the scope directly, we need to customize the `OpenAIClient`’s HTTP pipeline to inject the correct scope when requesting the token. Here’s how:
+
+#### Updated Configuration
+```java
+import com.azure.ai.openai.OpenAIClient;
+import com.azure.ai.openai.OpenAIClientBuilder;
+import com.azure.core.credential.TokenCredential;
+import com.azure.core.credential.TokenRequestContext;
+import com.azure.core.http.HttpPipeline;
+import com.azure.core.http.HttpPipelineBuilder;
+import com.azure.core.http.policy.BearerTokenAuthenticationPolicy;
+import com.azure.identity.ClientSecretCredential;
+import com.azure.identity.ClientSecretCredentialBuilder;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class AzureOpenAIConfig {
+
+    @Bean
+    public TokenCredential tokenCredential() {
+        return new ClientSecretCredentialBuilder()
+            .clientId("YOUR_CLIENT_ID")
+            .clientSecret("YOUR_CLIENT_SECRET")
+            .tenantId("YOUR_TENANT_ID")
+            .build();
+    }
+
+    @Bean
+    public OpenAIClient openAIClient(TokenCredential tokenCredential) {
+        // Define the correct scope for Azure OpenAI
+        String scope = "https://cognitiveservices.azure.com/.default"; // Adjust if custom, e.g., "api://<your-app-id>/.default"
+
+        // Create a custom pipeline with the correct scope
+        HttpPipeline pipeline = new HttpPipelineBuilder()
+            .policies(new BearerTokenAuthenticationPolicy(tokenCredential, scope))
+            .build();
+
+        return new OpenAIClientBuilder()
+            .endpoint("https://your-resource-name.openai.azure.com/")
+            .pipeline(pipeline) // Use the custom pipeline with the specified scope
+            .buildClient();
+    }
+}
+```
+
+---
+
+### Explanation
+1. **`BearerTokenAuthenticationPolicy`**:
+   - This policy handles token acquisition and attaches the `Authorization: Bearer <token>` header to requests.
+   - It takes a `TokenCredential` and a scope as parameters, ensuring the token is requested with the specified scope (e.g., `https://cognitiveservices.azure.com/.default`).
+
+2. **Custom `HttpPipeline`**:
+   - By building a custom pipeline, we override the default authentication behavior of the `OpenAIClientBuilder`.
+   - The `BearerTokenAuthenticationPolicy` ensures the token is fetched with the correct scope before each request.
+
+3. **Scope**:
+   - Use `https://cognitiveservices.azure.com/.default` if it’s a standard Azure OpenAI setup.
+   - If your Python program or Entra ID app registration uses a custom scope (e.g., `api://<your-app-id>/.default`), replace it accordingly.
+
+---
+
+### Verify the Scope
+- **Enable Logging**: Ensure you have:
+  ```properties
+  logging.level.com.azure=DEBUG
+  logging.level.com.azure.core.http=TRACE
+  ```
+- **Check Logs**: After running your `/chat` endpoint, look for the token request:
+  ```
+  TRACE [http-nio-8080-exec-1] com.azure.core.http - Token Request: Scope=https://cognitiveservices.azure.com/.default
+  TRACE [http-nio-8080-exec-1] com.azure.core.http - Request: POST https://your-resource-name.openai.azure.com/openai/deployments/your-deployment-name/chat/completions?api-version=2023-05-15
+  TRACE [http-nio-8080-exec-1] com.azure.core.http - Response: 200 OK
+  ```
+
+---
+
+### Match Python’s Working Scope
+Since your Python `client.chat.completions.create()` works:
+- If it uses `azure_ad_token_provider`, it might rely on `DefaultAzureCredential`:
+  ```python
+  from azure.identity import DefaultAzureCredential
+  credential = DefaultAzureCredential()
+  token = credential.get_token("https://cognitiveservices.azure.com/.default")
+  ```
+- Check your Python code or logs for the scope (e.g., `scope=` in token acquisition).
+- Update the Java `scope` variable to match.
+
+---
+
+### Full Working Example
+Here’s the complete setup with your controller:
+
+```java
+import com.azure.ai.openai.OpenAIClient;
+import com.azure.ai.openai.OpenAIClientBuilder;
+import com.azure.ai.openai.models.ChatCompletions;
+import com.azure.ai.openai.models.ChatCompletionsOptions;
+import com.azure.ai.openai.models.ChatRequestMessage;
+import com.azure.ai.openai.models.ChatRole;
+import com.azure.core.credential.TokenCredential;
+import com.azure.core.http.HttpPipeline;
+import com.azure.core.http.HttpPipelineBuilder;
+import com.azure.core.http.policy.BearerTokenAuthenticationPolicy;
+import com.azure.identity.ClientSecretCredentialBuilder;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.util.Arrays;
+import java.util.List;
+
+@Configuration
+public class AzureOpenAIConfig {
+
+    @Bean
+    public TokenCredential tokenCredential() {
+        return new ClientSecretCredentialBuilder()
+            .clientId("YOUR_CLIENT_ID")
+            .clientSecret("YOUR_CLIENT_SECRET")
+            .tenantId("YOUR_TENANT_ID")
+            .build();
+    }
+
+    @Bean
+    public OpenAIClient openAIClient(TokenCredential tokenCredential) {
+        String scope = "https://cognitiveservices.azure.com/.default"; // Adjust if custom
+
+        HttpPipeline pipeline = new HttpPipelineBuilder()
+            .policies(new BearerTokenAuthenticationPolicy(tokenCredential, scope))
+            .build();
+
+        return new OpenAIClientBuilder()
+            .endpoint("https://your-resource-name.openai.azure.com/")
+            .pipeline(pipeline)
+            .buildClient();
+    }
+}
+
+@RestController
+public class ChatController {
+    private final OpenAIClient openAIClient;
+
+    public ChatController(OpenAIClient openAIClient) {
+        this.openAIClient = openAIClient;
+    }
+
+    @GetMapping("/chat")
+    public String chat(@RequestParam String userMessage) {
+        List<ChatRequestMessage> messages = Arrays.asList(
+            new ChatRequestMessage(ChatRole.SYSTEM, "You are a helpful assistant."),
+            new ChatRequestMessage(ChatRole.USER, userMessage)
+        );
+        ChatCompletionsOptions options = new ChatCompletionsOptions(messages)
+            .setMaxTokens(100)
+            .setTemperature(0.7);
+
+        try {
+            ChatCompletions completions = openAIClient.getChatCompletions("your-deployment-name", options);
+            return completions.getChoices().get(0).getMessage().getContent();
+        } catch (Exception e) {
+            e.printStackTrace();
+            return "Error: " + e.getMessage();
+        }
+    }
+}
+```
+
+---
+
+### Dependencies
+Ensure your `build.gradle` includes:
+```groovy
+implementation 'com.azure:azure-ai-openai:1.0.0-beta.6' // Or latest
+implementation 'com.azure:azure-identity:1.15.4'
+```
+
+---
+
+### Next Steps
+1. **Test**: Run your app and hit `/chat?userMessage=Hello`.
+2. **Logs**: Confirm the scope in the token request matches your API’s expectation.
+3. **Custom Scope**: If `https://cognitiveservices.azure.com/.default` still fails, share your Entra ID app’s Application ID URI or Python token scope for a custom adjustment.
+
+This should resolve the "invalid JWT token" issue by ensuring the correct scope is used! Let me know how it goes or if you need further tweaks.
