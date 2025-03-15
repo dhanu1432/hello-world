@@ -1,22 +1,19 @@
-You’re correct to point out that the `AzureOpenAiChatModel` in Spring AI version 1.0.0-M6 does not directly accept a `RestClient` as a constructor parameter in the way I described in previous responses. I apologize for the oversight in my earlier answers, where I assumed a constructor signature that aligns with older versions or other models like `OpenAiChatModel`. Let’s clarify this and provide a working solution based on the actual API available in Spring AI 1.0.0-M6, ensuring we use `ChatClientCustomizer` with Azure OpenAI and OAuth2 credentials.
+You’re absolutely right, and I apologize for the confusion. In Spring AI 1.0.0-M6, the `ChatClient.Builder` class does not have a `defaultChatModel` method. My previous responses incorrectly assumed this method existed based on older versions or a misinterpretation of the API. Let’s correct this by aligning with the actual API in Spring AI 1.0.0-M6.
 
-### Background on Spring AI 1.0.0-M6
+In Spring AI 1.0.0-M6, the `ChatClient.Builder` provides a method called `defaultAdvisors` to configure advisors and a `build()` method to create the `ChatClient`. However, to set a specific `ChatModel` (like `AzureOpenAiChatModel`), the idiomatic approach with `ChatClientCustomizer` is less straightforward since the builder doesn’t directly expose a method to set the `ChatModel`. Instead, the `ChatClient` is typically constructed with a `ChatModel` instance directly via dependency injection or by customizing the `ChatClient` creation process.
 
-In Spring AI 1.0.0-M6, the `AzureOpenAiChatModel` class has evolved, and its constructor does not take a `RestClient` directly as a parameter. Instead, it relies on an `OpenAIClient` from the Azure OpenAI SDK (`com.azure.ai.openai.OpenAIClient`) and optional `AzureOpenAiChatOptions`. This is a shift from earlier assumptions where I suggested injecting a custom `RestClient` directly into the model. The `OpenAIClient` is typically built using the Azure SDK’s `OpenAIClientBuilder`, which supports token-based authentication (OAuth2) via `TokenCredential`.
+Given that `defaultChatModel` isn’t available, here’s how we can adjust the solution:
 
-Given this, we need to:
-1. Use the Azure Identity library to provide OAuth2 credentials.
-2. Build an `OpenAIClient` with a custom HTTP client (e.g., OkHttp) that includes the OAuth2 token.
-3. Pass this `OpenAIClient` to `AzureOpenAiChatModel`.
-4. Use `ChatClientCustomizer` to integrate it with Spring AI’s `ChatClient`.
+1. **Directly Provide the `ChatClient` Bean**: Instead of relying on `ChatClientCustomizer` to set a default model (since the API doesn’t support it in this way), we can define the `ChatClient` bean explicitly with the desired `ChatModel`.
+2. **Maintain Vendor Neutrality**: Use conditional bean definitions to switch between LLMs based on configuration properties.
+
+This approach bypasses the incorrect assumption about `defaultChatModel` and aligns with Spring AI 1.0.0-M6’s actual capabilities.
 
 ### Corrected Solution for Spring AI 1.0.0-M6
 
-Here’s how to implement this with `ChatClientCustomizer` in Spring AI 1.0.0-M6, using OAuth2 credentials for Azure OpenAI:
+#### Step 1: Dependencies
 
-#### Step 1: Add Dependencies
-
-Ensure your `pom.xml` includes the necessary dependencies. Note that Spring AI 1.0.0-M6 requires the Azure OpenAI SDK:
+The dependencies remain unchanged:
 
 ```xml
 <dependencies>
@@ -66,7 +63,7 @@ Ensure your `pom.xml` includes the necessary dependencies. Note that Spring AI 1
 
 #### Step 2: Configure Properties
 
-Set up your `application.properties`:
+The `application.properties` remains the same:
 
 ```properties
 azure.oauth2.client-id=your-client-id
@@ -77,9 +74,9 @@ spring.ai.azure.openai.deployment-name=your-model-name  # e.g., gpt-35-turbo
 spring.ai.llm.provider=azure-oauth
 ```
 
-#### Step 3: Configuration with `ChatClientCustomizer`
+#### Step 3: Configuration for Azure OpenAI
 
-Here’s the corrected configuration:
+Since `ChatClient.Builder` doesn’t have `defaultChatModel`, we’ll define the `ChatClient` directly:
 
 ```java
 package com.example.chatbot.config;
@@ -92,13 +89,11 @@ import com.azure.identity.ClientSecretCredentialBuilder;
 import org.springframework.ai.azure.openai.AzureOpenAiChatModel;
 import org.springframework.ai.azure.openai.AzureOpenAiChatOptions;
 import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.chat.client.ChatClientCustomizer;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Conditional;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import okhttp3.Interceptor;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 
@@ -155,25 +150,58 @@ public class AiConfig {
     }
 
     @Bean
-    public ChatClientCustomizer chatClientCustomizer(OpenAIClient openAIClient) {
-        return builder -> builder.defaultChatModel(new AzureOpenAiChatModel(
+    public ChatClient chatClient(OpenAIClient openAIClient) {
+        AzureOpenAiChatModel chatModel = new AzureOpenAiChatModel(
                 openAIClient,
                 AzureOpenAiChatOptions.builder()
                         .withDeploymentName(deploymentName)
                         .withTemperature(0.7)
                         .build()
-        ));
+        );
+        return ChatClient.builder(chatModel).build();
     }
 }
 ```
 
-#### Explanation
+#### Step 4: Configuration for OpenAI
 
-- **No `RestClient` Parameter**: In 1.0.0-M6, `AzureOpenAiChatModel`’s constructor accepts an `OpenAIClient` (from `com.azure.ai.openai`) and optionally `AzureOpenAiChatOptions`. It does not take a `RestClient` directly, as I mistakenly assumed earlier. The `RestClient` approach was more applicable to earlier versions or other models.
-- **OAuth2 via `OpenAIClient`**: We build an `OpenAIClient` using `OpenAIClientBuilder`, configuring it with a custom `OkHttpClient` that adds the OAuth2 token to the `Authorization` header. This replaces the API key typically provided via `AzureKeyCredential`.
-- **ChatClientCustomizer**: The customizer sets the `AzureOpenAiChatModel` as the default `ChatModel` for the `ChatClient.Builder`, integrating it into Spring AI’s fluent API.
+Similarly, for OpenAI:
 
-#### Step 4: Use the ChatClient
+```java
+package com.example.chatbot.config;
+
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.openai.OpenAiChatModel;
+import org.springframework.ai.openai.OpenAiChatOptions;
+import org.springframework.ai.openai.api.OpenAiApi;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Conditional;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+
+@Configuration
+@ConditionalOnProperty(name = "spring.ai.llm.provider", havingValue = "openai")
+public class OpenAiConfig {
+
+    @Value("${spring.ai.openai.api-key}")
+    private String openAiApiKey;
+
+    @Bean
+    public ChatClient chatClient() {
+        OpenAiChatModel chatModel = new OpenAiChatModel(
+                new OpenAiApi(openAiApiKey),
+                OpenAiChatOptions.builder()
+                        .withModel("gpt-4")
+                        .withTemperature(0.7)
+                        .build()
+        );
+        return ChatClient.builder(chatModel).build();
+    }
+}
+```
+
+#### Step 5: Controller
 
 The controller remains unchanged:
 
@@ -204,32 +232,9 @@ public class ChatController {
 }
 ```
 
-#### Step 5: Vendor Neutrality
+#### Switching Providers
 
-For OpenAI or other LLMs, define a separate `ChatClientCustomizer`:
-
-```java
-@Configuration
-@ConditionalOnProperty(name = "spring.ai.llm.provider", havingValue = "openai")
-public class OpenAiConfig {
-
-    @Value("${spring.ai.openai.api-key}")
-    private String openAiApiKey;
-
-    @Bean
-    public ChatClientCustomizer chatClientCustomizer() {
-        return builder -> builder.defaultChatModel(new OpenAiChatModel(
-                new OpenAiApi(openAiApiKey),
-                OpenAiChatOptions.builder()
-                        .withModel("gpt-4")
-                        .withTemperature(0.7)
-                        .build()
-        ));
-    }
-}
-```
-
-Switch providers in `application.properties`:
+Switch between Azure OpenAI and OpenAI in `application.properties`:
 
 ```properties
 # For Azure OpenAI with OAuth2
@@ -240,16 +245,22 @@ spring.ai.llm.provider=azure-oauth
 # spring.ai.openai.api-key=your-openai-api-key
 ```
 
-### Verification
+### Why `defaultChatModel` Was Wrong
 
-- **Constructor in 1.0.0-M6**: In Spring AI 1.0.0-M6, the `AzureOpenAiChatModel` constructor is documented to take an `OpenAIClient` and optional `AzureOpenAiChatOptions`. My earlier responses incorrectly assumed a `RestClient` parameter, which was a misinterpretation based on older patterns or other models.
-- **OAuth2 Support**: Azure OpenAI supports token-based authentication, and the `OpenAIClientBuilder` allows customization of the HTTP client to include OAuth2 tokens, as implemented here.
+- **API in 1.0.0-M6**: In Spring AI 1.0.0-M6, the `ChatClient.Builder` class does not have a `defaultChatModel` method. Instead, it’s designed to accept a `ChatModel` at construction time via `ChatClient.builder(ChatModel chatModel)`. My earlier assumption came from conflating this with older APIs or misreading the intent of `ChatClientCustomizer`, which is more suited for adding advisors (e.g., `defaultAdvisors`) rather than setting the core `ChatModel`.
+- **Correct Approach**: By defining the `ChatClient` bean directly with `ChatClient.builder(chatModel).build()`, we provide the `ChatModel` explicitly, avoiding reliance on a nonexistent method.
+
+### Why This Works
+
+- **Explicit `ChatModel` Injection**: The `ChatClient` is constructed with the desired `ChatModel` (`AzureOpenAiChatModel` or `OpenAiChatModel`), ensuring the correct model is used.
+- **Vendor Neutrality**: The `@ConditionalOnProperty` annotation ensures only one `ChatClient` bean is created based on the `spring.ai.llm.provider` property, maintaining portability.
+- **OAuth2 for Azure**: The `OpenAIClient` is configured with a custom `OkHttpClient` that handles OAuth2 authentication, meeting your requirement to avoid an API key.
 
 ### Considerations
 
-- **Token Management**: The `getTokenSync` approach is synchronous and fetches a token per request. For production, use a caching mechanism or handle token refresh asynchronously.
-- **Version Stability**: 1.0.0-M6 is a milestone release, so check the Spring AI GitHub or documentation for any breaking changes in subsequent releases (e.g., 1.0.0-RC1 or GA).
+- **ChatClientCustomizer Limitation**: While `ChatClientCustomizer` is useful for adding advisors or modifying the builder’s behavior (e.g., `defaultSystem`, `defaultAdvisors`), it’s not the right tool for setting the `ChatModel` in 1.0.0-M6. Hence, we reverted to defining the `ChatClient` bean directly.
+- **Token Management**: The `getTokenSync` approach remains a placeholder; implement token caching or async refresh for production use.
 
 ### Conclusion
 
-In Spring AI 1.0.0-M6, `AzureOpenAiChatModel` does not take a `RestClient` as a parameter but instead uses an `OpenAIClient`. By building the `OpenAIClient` with a custom `OkHttpClient` that handles OAuth2 authentication, and integrating it via `ChatClientCustomizer`, you can achieve your goal of using Azure OpenAI with OAuth2 credentials in a vendor-neutral way. This solution avoids API keys and ensures your application remains portable across LLM providers. Let me know if you need further assistance!
+In Spring AI 1.0.0-M6, `ChatClient.Builder` does not have a `defaultChatModel` method, so we define the `ChatClient` bean explicitly with the desired `ChatModel`. This corrected solution uses `AzureOpenAiChatModel` with an OAuth2-configured `OpenAIClient` for Azure OpenAI, ensures vendor neutrality via conditional configuration, and aligns with the actual API. I regret the confusion caused by the earlier incorrect assumptions—thank you for your patience in pointing these out! Let me know if you need further clarification.
