@@ -1,0 +1,305 @@
+You’re correct that Spring AI’s default configuration for `ChatClient` with Azure OpenAI (`spring-ai-azure-openai-spring-boot-starter`) assumes an API key (`spring.ai.azure.openai.api-key`) for authentication. However, Azure OpenAI also supports OAuth 2.0 authentication using Azure Active Directory (AAD) tokens, which is common in enterprise environments where API keys are avoided for security reasons. Spring AI’s current version (0.8.0-SNAPSHOT) doesn’t natively support OAuth 2.0 token-based authentication out of the box via properties, but you can achieve this by customizing the `ChatClient` creation process.
+
+Since you need to use an OAuth 2.0 token instead of an API key, you’ll need to:
+1. Obtain an access token from Azure AD.
+2. Create a custom `ChatClient` that uses this token to authenticate with Azure OpenAI.
+3. Integrate it into Spring AI’s framework.
+
+Below, I’ll outline how to create a `ChatClient` instance using an OAuth 2.0 token and integrate it with your existing application.
+
+---
+
+### Steps to Create a `ChatClient` with OAuth 2.0 Token
+
+#### 1. Obtain an OAuth 2.0 Token
+You’ll use the Azure SDK or a library like Spring Security OAuth2 to fetch a token from Azure AD. For simplicity, I’ll use the Azure Identity SDK (`azure-identity`) to handle token acquisition.
+
+#### 2. Use Azure OpenAI SDK with Token
+The Azure OpenAI SDK (`com.azure.ai.openai`) supports token-based authentication via `TokenCredential`. You’ll create an `OpenAIClient` with this credential and wrap it in a `ChatClient`.
+
+#### 3. Configure Spring AI
+Override Spring AI’s default `ChatClient` bean with your custom implementation.
+
+---
+
+### Updated Dependencies (`pom.xml`)
+Add dependencies for Azure Identity and Azure OpenAI SDK:
+```xml
+<dependencies>
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-web</artifactId>
+        <version>3.2.0</version>
+    </dependency>
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-data-mongodb</artifactId>
+        <version>3.2.0</version>
+    </dependency>
+    <dependency>
+        <groupId>org.springframework.ai</groupId>
+        <artifactId>spring-ai-azure-openai-spring-boot-starter</artifactId>
+        <version>0.8.0-SNAPSHOT</version>
+    </dependency>
+    <dependency>
+        <groupId>com.azure</groupId>
+        <artifactId>azure-identity</artifactId>
+        <version>1.12.0</version> <!-- Use latest version -->
+    </dependency>
+    <dependency>
+        <groupId>com.azure</groupId>
+        <artifactId>azure-ai-openai</artifactId>
+        <version>1.0.0-beta.6</version> <!-- Use latest version -->
+    </dependency>
+    <dependency>
+        <groupId>org.projectlombok</groupId>
+        <artifactId>lombok</artifactId>
+        <version>1.18.30</version>
+        <scope>provided</scope>
+    </dependency>
+    <dependency>
+        <groupId>com.google.code.gson</groupId>
+        <artifactId>gson</artifactId>
+        <version>2.10.1</version>
+    </dependency>
+</dependencies>
+
+<repositories>
+    <repository>
+        <id>spring-snapshots</id>
+        <url>https://repo.spring.io/snapshot</url>
+        <snapshots>
+            <enabled>true</enabled>
+        </snapshots>
+    </repository>
+</repositories>
+```
+
+---
+
+### Implementation
+
+#### 1. Custom `ChatClient` with OAuth 2.0
+Create a custom `ChatClient` implementation that uses an OAuth 2.0 token via `azure-identity`.
+
+```java
+package com.example.dice;
+
+import com.azure.ai.openai.OpenAIClient;
+import com.azure.ai.openai.OpenAIClientBuilder;
+import com.azure.ai.openai.models.ChatCompletionsOptions;
+import com.azure.ai.openai.models.ChatRequestMessage;
+import com.azure.core.credential.TokenCredential;
+import com.azure.identity.ClientSecretCredentialBuilder;
+import org.springframework.ai.chat.ChatClient;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+import java.util.Collections;
+
+@Configuration
+public class AzureOpenAIConfig {
+
+    @Value("${azure.openai.endpoint}")
+    private String endpoint;
+
+    @Value("${azure.openai.deployment-name}")
+    private String deploymentName;
+
+    @Value("${azure.client-id}")
+    private String clientId;
+
+    @Value("${azure.client-secret}")
+    private String clientSecret;
+
+    @Value("${azure.tenant-id}")
+    private String tenantId;
+
+    @Bean
+    public ChatClient chatClient() {
+        // Create TokenCredential using ClientSecretCredential (or other credential types)
+        TokenCredential credential = new ClientSecretCredentialBuilder()
+            .clientId(clientId)
+            .clientSecret(clientSecret)
+            .tenantId(tenantId)
+            .build();
+
+        // Build Azure OpenAI client with OAuth 2.0 token
+        OpenAIClient azureOpenAIClient = new OpenAIClientBuilder()
+            .endpoint(endpoint)
+            .credential(credential)
+            .buildClient();
+
+        return new OAuthAzureOpenAIChatClient(azureOpenAIClient, deploymentName);
+    }
+}
+
+class OAuthAzureOpenAIChatClient implements ChatClient {
+    private final OpenAIClient azureOpenAIClient;
+    private final String deploymentName;
+
+    public OAuthAzureOpenAIChatClient(OpenAIClient azureOpenAIClient, String deploymentName) {
+        this.azureOpenAIClient = azureOpenAIClient;
+        this.deploymentName = deploymentName;
+    }
+
+    @Override
+    public String call(String prompt) {
+        ChatCompletionsOptions options = new ChatCompletionsOptions(
+            Collections.singletonList(new ChatRequestMessage("user", prompt))
+        );
+        options.setModel(deploymentName);
+        return azureOpenAIClient
+            .getChatCompletions(deploymentName, options)
+            .getChoices()
+            .get(0)
+            .getMessage()
+            .getContent();
+    }
+}
+```
+
+- **Explanation**:
+  - `ClientSecretCredentialBuilder` fetches an OAuth 2.0 token from Azure AD using client credentials flow. You could also use `DefaultAzureCredential` for broader authentication options (e.g., managed identity, interactive login).
+  - `OpenAIClientBuilder` uses the `TokenCredential` to authenticate with Azure OpenAI.
+  - `OAuthAzureOpenAIChatClient` implements `ChatClient` and delegates to the `azureOpenAIClient`.
+
+---
+
+#### 2. Update `application.properties`
+Replace API key-based properties with OAuth 2.0 configuration:
+```properties
+spring.data.mongodb.uri=mongodb://localhost:27017/dice_db
+spring.data.mongodb.database=dice_db
+
+# Azure OpenAI Configuration (no api-key)
+azure.openai.endpoint=https://your-azure-openai-endpoint.openai.azure.com/
+azure.openai.deployment-name=your-deployment-name
+
+# Azure AD OAuth 2.0 Configuration
+azure.client-id=your-client-id
+azure.client-secret=your-client-secret
+azure.tenant-id=your-tenant-id
+
+rag.enabled=true
+prompt.collection.prefix=voice_prompts
+```
+
+- **Notes**:
+  - Remove `spring.ai.azure.openai.api-key` since you’re not using it.
+  - Replace `your-client-id`, `your-client-secret`, and `your-tenant-id` with values from your Azure AD app registration.
+
+---
+
+#### 3. Verify in `LlmService`
+Your existing `LlmService` should work unchanged, as it relies on the injected `ChatClient`:
+```java
+package com.example.dice;
+
+import com.google.gson.Gson;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.RequiredArgsConstructor;
+import lombok.Setter;
+import org.springframework.ai.chat.ChatClient;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.stereotype.Service;
+
+import javax.annotation.PostConstruct;
+import java.util.List;
+import java.util.Optional;
+import java.util.stream.Collectors;
+
+@Service
+@RequiredArgsConstructor
+public class LlmService {
+    private final ChatClient chatClient;
+    private final MongoTemplate mongoTemplate;
+    private final Gson gson = new Gson();
+
+    @PostConstruct
+    public void init() {
+        System.out.println("ChatClient instance: " + chatClient.getClass().getName());
+        // Should print: com.example.dice.OAuthAzureOpenAIChatClient
+    }
+
+    @Getter
+    @Setter
+    @NoArgsConstructor
+    public static class LlmResponse {
+        private String text;
+        private String tool;
+        private String toolInput;
+
+        public LlmResponse(String text, String tool, String toolInput) {
+            this.text = text;
+            this.tool = tool;
+            this.toolInput = toolInput;
+        }
+    }
+
+    public LlmResponse generateResponse(String prompt, List<String> chatHistory, Optional<String> ragContext, String teamId) {
+        String fullPrompt = chatHistory.stream().collect(Collectors.joining("\n", "Chat History:\n", "\n")) +
+                           ragContext.map(ctx -> "RAG Context:\n" + ctx + "\n").orElse("") +
+                           "Current Prompt:\n" + prompt + "\n" +
+                           "Respond with JSON: {\"text\": \"response\", \"tool\": \"tool_name\", \"toolInput\": \"input\"}";
+        String response = chatClient.call(fullPrompt);
+        return gson.fromJson(response, LlmResponse.class);
+    }
+
+    // Other methods unchanged...
+}
+```
+
+---
+
+### Alternative: Using Spring AI’s Internal Client
+Spring AI’s `AzureOpenAIChatClient` (internal to `spring-ai-azure-openai`) doesn’t directly support OAuth 2.0 tokens via properties in 0.8.0-SNAPSHOT. If you want to use Spring AI’s implementation with OAuth, you’d need to:
+1. Fork or extend Spring AI’s code.
+2. Modify its client to accept a `TokenCredential` instead of an API key.
+
+However, this requires maintaining a custom Spring AI build, which isn’t ideal. The custom `OAuthAzureOpenAIChatClient` above is simpler and avoids modifying Spring AI.
+
+---
+
+### Using Other Credential Types
+If client credentials aren’t suitable (e.g., you need managed identity or user delegation), use `DefaultAzureCredential`:
+```java
+import com.azure.identity.DefaultAzureCredentialBuilder;
+
+@Bean
+public ChatClient chatClient() {
+    TokenCredential credential = new DefaultAzureCredentialBuilder().build();
+    OpenAIClient azureOpenAIClient = new OpenAIClientBuilder()
+        .endpoint(endpoint)
+        .credential(credential)
+        .buildClient();
+    return new OAuthAzureOpenAIChatClient(azureOpenAIClient, deploymentName);
+}
+```
+
+- `DefaultAzureCredential` tries multiple authentication methods (e.g., managed identity, environment variables, interactive login) in order.
+
+---
+
+### Testing
+1. **Start the app**: Ensure your Azure AD credentials are correct.
+2. **Check logs**: Verify `ChatClient instance: com.example.dice.OAuthAzureOpenAIChatClient`.
+3. **Make a request**:
+   ```
+   POST /dice/engage
+   {"olSessionId": "client123", "flowIdentifier": "voice", "ban": "BAN123", "teamId": "teamA"}
+   ```
+   The response should come from Azure OpenAI using the OAuth token.
+
+---
+
+### Notes
+- **Scope**: The token scope should be `https://cognitiveservices.azure.com/.default` for Azure OpenAI.
+- **Security**: Store `client-secret` securely (e.g., in Azure Key Vault or environment variables).
+- **Spring AI Evolution**: Future versions might add native OAuth support—check Spring AI’s roadmap.
+
+This approach gives you a `ChatClient` with OAuth 2.0 authentication, fitting your requirement to avoid API keys. Let me know if you need further assistance!
