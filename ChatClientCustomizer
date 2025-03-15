@@ -1,0 +1,259 @@
+You’re absolutely right—Spring AI provides a `ChatClientCustomizer` interface that allows you to customize the `ChatClient.Builder` before the `ChatClient` is created. This is a cleaner and more idiomatic way to integrate custom authentication (like Azure OpenAI with OAuth2 credentials) while leveraging Spring AI’s extensibility. Let’s explore how to use `ChatClientCustomizer` to configure a `ChatClient` for Azure OpenAI with OAuth2 credentials, ensuring it remains vendor-neutral and aligns with your Spring Boot chatbot application requirements.
+
+### Overview
+
+The `ChatClientCustomizer` interface has a single method:
+```java
+void customize(ChatClient.Builder builder);
+```
+This allows you to modify the `ChatClient.Builder`—for example, by setting a custom `ChatModel` like `AzureOpenAiChatModel` configured with a `RestClient` that uses OAuth2 authentication. We’ll use this approach instead of directly defining the `ChatClient` bean, making the solution more modular and reusable.
+
+### Solution Using `ChatClientCustomizer`
+
+Here’s how you can implement this:
+
+#### Step 1: Add Dependencies
+
+The dependencies remain the same as in my previous response:
+
+```xml
+<dependencies>
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>org.springframework.ai</groupId>
+        <artifactId>spring-ai-azure-openai-spring-boot-starter</artifactId>
+        <version>0.8.0</version>
+    </dependency>
+    <dependency>
+        <groupId>com.azure</groupId>
+        <artifactId>azure-identity</artifactId>
+        <version>1.13.0</version>
+    </dependency>
+    <dependency>
+        <groupId>com.squareup.okhttp3</groupId>
+        <artifactId>okhttp</artifactId>
+        <version>4.12.0</version>
+    </dependency>
+</dependencies>
+```
+
+#### Step 2: Configure Properties
+
+Set up your `application.properties`:
+
+```properties
+azure.oauth2.client-id=your-client-id
+azure.oauth2.client-secret=your-client-secret
+azure.oauth2.tenant-id=your-tenant-id
+spring.ai.azure.openai.endpoint=https://your-resource-name.openai.azure.com/
+spring.ai.azure.openai.deployment-name=your-model-name  # e.g., gpt-35-turbo
+spring.ai.llm.provider=azure-oauth
+```
+
+#### Step 3: Implement `ChatClientCustomizer`
+
+Create a configuration class that defines a `ChatClientCustomizer` bean to customize the `ChatClient.Builder` with an `AzureOpenAiChatModel` using OAuth2 authentication:
+
+```java
+package com.example.chatbot.config;
+
+import com.azure.core.credential.TokenCredential;
+import com.azure.identity.ClientSecretCredentialBuilder;
+import org.springframework.ai.azure.openai.AzureOpenAiChatModel;
+import org.springframework.ai.azure.openai.AzureOpenAiChatOptions;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.client.ChatClientCustomizer;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Conditional;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.http.client.ClientHttpRequestFactory;
+import org.springframework.http.client.OkHttp3ClientHttpRequestFactory;
+import org.springframework.web.client.RestClient;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+
+@Configuration
+@ConditionalOnProperty(name = "spring.ai.llm.provider", havingValue = "azure-oauth")
+public class AiConfig {
+
+    @Value("${azure.oauth2.client-id}")
+    private String clientId;
+
+    @Value("${azure.oauth2.client-secret}")
+    private String clientSecret;
+
+    @Value("${azure.oauth2.tenant-id}")
+    private String tenantId;
+
+    @Value("${spring.ai.azure.openai.endpoint}")
+    private String endpoint;
+
+    @Value("${spring.ai.azure.openai.deployment-name}")
+    private String deploymentName;
+
+    @Bean
+    public TokenCredential tokenCredential() {
+        return new ClientSecretCredentialBuilder()
+                .clientId(clientId)
+                .clientSecret(clientSecret)
+                .tenantId(tenantId)
+                .build();
+    }
+
+    @Bean
+    public OkHttpClient okHttpClient(TokenCredential credential) {
+        return new OkHttpClient.Builder()
+                .addInterceptor(chain -> {
+                    String accessToken = credential.getTokenSync(
+                            new TokenRequestContext().addScopes("https://cognitiveservices.azure.com/.default")
+                    ).getToken();
+                    Request originalRequest = chain.request();
+                    Request newRequest = originalRequest.newBuilder()
+                            .header("Authorization", "Bearer " + accessToken)
+                            .build();
+                    return chain.proceed(newRequest);
+                })
+                .build();
+    }
+
+    @Bean
+    public ClientHttpRequestFactory clientHttpRequestFactory(OkHttpClient okHttpClient) {
+        return new OkHttp3ClientHttpRequestFactory(okHttpClient);
+    }
+
+    @Bean
+    public RestClient restClient(ClientHttpRequestFactory requestFactory) {
+        return RestClient.builder()
+                .baseUrl(endpoint)
+                .requestFactory(requestFactory)
+                .build();
+    }
+
+    @Bean
+    public ChatClientCustomizer chatClientCustomizer(RestClient restClient) {
+        return builder -> builder
+                .defaultChatModel(new AzureOpenAiChatModel(
+                        restClient,
+                        AzureOpenAiChatOptions.builder()
+                                .withDeploymentName(deploymentName)
+                                .withTemperature(0.7)
+                                .build()
+                ));
+    }
+}
+```
+
+#### Explanation
+
+- **TokenCredential**: Obtains an OAuth2 access token using the Azure Identity library with your client ID, secret, and tenant ID.
+- **OkHttpClient**: Adds an interceptor to include the Bearer token in the `Authorization` header for each request.
+- **RestClient**: Configured with the custom `OkHttpClient` and the Azure OpenAI endpoint.
+- **ChatClientCustomizer**: Customizes the `ChatClient.Builder` by setting the default `ChatModel` to an `AzureOpenAiChatModel` instance with the OAuth2-configured `RestClient`.
+
+#### Step 4: Use the ChatClient
+
+Spring AI’s autoconfiguration will apply the `ChatClientCustomizer` when creating the `ChatClient`. Use it in your controller as before:
+
+```java
+package com.example.chatbot.controller;
+
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class ChatController {
+
+    private final ChatClient chatClient;
+
+    public ChatController(ChatClient chatClient) {
+        this.chatClient = chatClient;
+    }
+
+    @GetMapping("/chat")
+    public String chat(@RequestParam String message) {
+        return chatClient.prompt()
+                .user(message)
+                .call()
+                .content();
+    }
+}
+```
+
+Spring Boot will autowire the `ChatClient` with the customizations applied by your `ChatClientCustomizer`.
+
+#### Step 5: Vendor Neutrality
+
+To support other LLMs (e.g., OpenAI), define a separate `ChatClientCustomizer` configuration:
+
+```java
+package com.example.chatbot.config;
+
+import org.springframework.ai.chat.client.ChatClientCustomizer;
+import org.springframework.ai.openai.OpenAiChatModel;
+import org.springframework.ai.openai.OpenAiChatOptions;
+import org.springframework.ai.openai.api.OpenAiApi;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Conditional;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+
+@Configuration
+@ConditionalOnProperty(name = "spring.ai.llm.provider", havingValue = "openai")
+public class OpenAiConfig {
+
+    @Value("${spring.ai.openai.api-key}")
+    private String openAiApiKey;
+
+    @Bean
+    public ChatClientCustomizer chatClientCustomizer() {
+        return builder -> builder
+                .defaultChatModel(new OpenAiChatModel(
+                        new OpenAiApi(openAiApiKey),
+                        OpenAiChatOptions.builder()
+                                .withModel("gpt-4")
+                                .withTemperature(0.7)
+                                .build()
+                ));
+    }
+}
+```
+
+Switch providers in `application.properties`:
+
+```properties
+# For Azure OpenAI with OAuth2
+spring.ai.llm.provider=azure-oauth
+
+# For OpenAI
+# spring.ai.llm.provider=openai
+# spring.ai.openai.api-key=your-openai-api-key
+```
+
+#### How It Works
+
+- **Customization**: The `ChatClientCustomizer` modifies the `ChatClient.Builder` to use the `AzureOpenAiChatModel` with a custom `RestClient` for OAuth2 authentication.
+- **Spring AI Integration**: Spring AI’s autoconfiguration picks up all `ChatClientCustomizer` beans and applies them to the `ChatClient` instance it creates.
+- **Vendor Neutrality**: The `ChatClient` abstraction remains the interface to your application logic. Switching LLMs involves only changing the `spring.ai.llm.provider` property and providing the corresponding customizer.
+
+### Advantages of Using `ChatClientCustomizer`
+
+- **Modularity**: Separates the customization logic from the `ChatClient` creation, aligning with Spring’s dependency injection principles.
+- **Reusability**: You can define multiple customizers and let Spring apply them conditionally based on configuration.
+- **Simplicity**: Avoids manually defining the `ChatClient` bean, leveraging Spring AI’s built-in mechanisms.
+
+### Considerations
+
+- **Token Management**: The current `OkHttpClient` fetches a new token for each request. For production, implement token caching or use `credential.getToken()` with a reactive approach to handle expiration.
+- **Spring AI Version**: This solution is based on Spring AI 0.8.0. Verify compatibility with your version, as the framework’s internals may evolve.
+
+### Conclusion
+
+Using `ChatClientCustomizer` is a viable and elegant way to configure a `ChatClient` for Azure OpenAI with OAuth2 credentials in Spring AI. It avoids the need for an API key, integrates seamlessly with Spring Boot, and maintains vendor neutrality by keeping your application code dependent only on the `ChatClient` abstraction. You can easily switch to other LLMs by providing alternative `ChatClientCustomizer` implementations, activated via configuration properties. Let me know if you’d like me to refine this further!
