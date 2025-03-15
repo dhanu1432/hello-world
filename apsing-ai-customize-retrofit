@@ -1,0 +1,278 @@
+To access the Azure OpenAI model using the Spring AI library in a Spring Boot chatbot application without an API key, relying solely on OAuth2 credentials, and ensuring a vendor-neutral implementation for easy switching to other large language models (LLMs) in the future, you can follow the approach outlined below. This solution leverages Spring AI's abstractions while integrating OAuth2 authentication via the Azure Identity library, avoiding direct dependency on the Azure OpenAI-specific library.
+
+### Overview
+
+Spring AI provides a portable API through the `ChatClient` abstraction, which interacts with various LLMs via implementations of the `ChatModel` interface. For Azure OpenAI, Spring AI typically uses the `AzureOpenAiChatModel`, which expects an API key. However, Azure OpenAI also supports Azure Active Directory (Azure AD) token-based authentication, allowing you to use OAuth2 credentials instead of an API key. By customizing the authentication mechanism and configuring Spring AI appropriately, you can achieve both your goals: OAuth2-based access and vendor neutrality.
+
+### Solution
+
+The key is to:
+1. Use the Azure Identity library to obtain an OAuth2 access token with your credentials (e.g., client ID, client secret, and tenant ID).
+2. Customize the HTTP client used by Spring AI’s `AzureOpenAiApi` to include the token in the `Authorization` header as a Bearer token.
+3. Configure Spring AI to use this customized setup within a `ChatModel` bean.
+4. Ensure vendor neutrality by relying on the `ChatClient` abstraction and making the `ChatModel` implementation configurable.
+
+Below is a step-by-step implementation.
+
+#### Step 1: Add Dependencies
+
+First, include the necessary dependencies in your `pom.xml`:
+
+```xml
+<dependencies>
+    <!-- Spring Boot Starter -->
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter</artifactId>
+    </dependency>
+
+    <!-- Spring AI Azure OpenAI -->
+    <dependency>
+        <groupId>org.springframework.ai</groupId>
+        <artifactId>spring-ai-azure-openai-spring-boot-starter</artifactId>
+        <version>0.8.0</version> <!-- Use the latest version -->
+    </dependency>
+
+    <!-- Azure Identity for OAuth2 -->
+    <dependency>
+        <groupId>com.azure</groupId>
+        <artifactId>azure-identity</artifactId>
+        <version>1.13.0</version> <!-- Use the latest version -->
+    </dependency>
+
+    <!-- Retrofit and OkHttp for HTTP client customization -->
+    <dependency>
+        <groupId>com.squareup.okhttp3</groupId>
+        <artifactId>okhttp</artifactId>
+        <version>4.12.0</version>
+    </dependency>
+</dependencies>
+```
+
+#### Step 2: Configure OAuth2 Credentials
+
+Assume you have OAuth2 credentials: a client ID, client secret, and tenant ID. Store these securely in your `application.properties` or `application.yml`. For example:
+
+```properties
+azure.oauth2.client-id=your-client-id
+azure.oauth2.client-secret=your-client-secret
+azure.oauth2.tenant-id=your-tenant-id
+spring.ai.azure.openai.endpoint=https://your-resource-name.openai.azure.com/
+spring.ai.llm.provider=azure-oauth
+```
+
+Replace the placeholders with your actual values. The `endpoint` is the URL of your Azure OpenAI deployment.
+
+#### Step 3: Create a Custom Configuration
+
+Create a Spring configuration class to set up the OAuth2 authentication and integrate it with Spring AI. This configuration will:
+- Obtain an access token using the Azure Identity library.
+- Customize the HTTP client to include the token.
+- Build a custom `AzureOpenAiApi` instance.
+- Define a `ChatModel` and `ChatClient` for use in your application.
+
+Here’s the implementation:
+
+```java
+package com.example.chatbot.config;
+
+import com.azure.core.credential.AccessToken;
+import com.azure.core.credential.TokenCredential;
+import com.azure.core.credential.TokenRequestContext;
+import com.azure.identity.ClientSecretCredentialBuilder;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import org.springframework.ai.azure.openai.AzureOpenAiChatModel;
+import org.springframework.ai.azure.openai.AzureOpenAiChatOptions;
+import org.springframework.ai.azure.openai.AzureOpenAiApi;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import retrofit2.Retrofit;
+import retrofit2.converter.jackson.JacksonConverterFactory;
+
+@Configuration
+public class AiConfig {
+
+    @Value("${azure.oauth2.client-id}")
+    private String clientId;
+
+    @Value("${azure.oauth2.client-secret}")
+    private String clientSecret;
+
+    @Value("${azure.oauth2.tenant-id}")
+    private String tenantId;
+
+    @Value("${spring.ai.azure.openai.endpoint}")
+    private String endpoint;
+
+    @Bean
+    public TokenCredential tokenCredential() {
+        return new ClientSecretCredentialBuilder()
+                .clientId(clientId)
+                .clientSecret(clientSecret)
+                .tenantId(tenantId)
+                .build();
+    }
+
+    @Bean
+    public OkHttpClient okHttpClient(TokenCredential credential) {
+        AccessToken token = credential.getTokenSync(
+                new TokenRequestContext().addScopes("https://cognitiveservices.azure.com/.default")
+        );
+        String accessToken = token.getToken();
+        return new OkHttpClient.Builder()
+                .addInterceptor(chain -> {
+                    Request originalRequest = chain.request();
+                    Request newRequest = originalRequest.newBuilder()
+                            .header("Authorization", "Bearer " + accessToken)
+                            .build();
+                    return chain.proceed(newRequest);
+                })
+                .build();
+    }
+
+    @Bean
+    public AzureOpenAiApi azureOpenAiApi(OkHttpClient okHttpClient) {
+        Retrofit retrofit = new Retrofit.Builder()
+                .baseUrl(endpoint)
+                .client(okHttpClient)
+                .addConverterFactory(JacksonConverterFactory.create())
+                .build();
+        return retrofit.create(AzureOpenAiApi.class);
+    }
+
+    @Bean
+    public ChatModel chatModel(AzureOpenAiApi api) {
+        return new AzureOpenAiChatModel(api, AzureOpenAiChatOptions.builder()
+                .withModel("your-model-name") // e.g., gpt-35-turbo
+                .withTemperature(0.7)
+                .build());
+    }
+
+    @Bean
+    public ChatClient chatClient(ChatModel chatModel) {
+        return ChatClient.builder(chatModel).build();
+    }
+}
+```
+
+**Notes:**
+- Replace `"your-model-name"` with the name of your deployed Azure OpenAI model (e.g., `gpt-35-turbo`).
+- The scope `"https://cognitiveservices.azure.com/.default"` is used to obtain a token valid for Azure Cognitive Services, including Azure OpenAI.
+- The `getTokenSync` method is used for simplicity; in a production environment, consider handling token expiration and refresh asynchronously.
+
+#### Step 4: Use the ChatClient in Your Application
+
+In your Spring Boot application, inject the `ChatClient` and use it to interact with the Azure OpenAI model. Here’s an example controller:
+
+```java
+package com.example.chatbot.controller;
+
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class ChatController {
+
+    private final ChatClient chatClient;
+
+    public ChatController(ChatClient chatClient) {
+        this.chatClient = chatClient;
+    }
+
+    @GetMapping("/chat")
+    public String chat(@RequestParam String message) {
+        return chatClient.prompt()
+                .user(message)
+                .call()
+                .content();
+    }
+}
+```
+
+This code defines a REST endpoint `/chat` that takes a user message and returns the model’s response.
+
+#### Step 5: Ensure Vendor Neutrality
+
+To make the implementation vendor-neutral and allow easy switching to other LLMs (e.g., OpenAI, Anthropic), use Spring’s conditional configuration. Define separate configuration classes for other providers and activate them based on a property like `spring.ai.llm.provider`. Here’s an example for OpenAI:
+
+```java
+package com.example.chatbot.config;
+
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.openai.OpenAiChatModel;
+import org.springframework.ai.openai.OpenAiChatOptions;
+import org.springframework.ai.openai.api.OpenAiApi;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Conditional;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+
+@Configuration
+@ConditionalOnProperty(name = "spring.ai.llm.provider", havingValue = "openai")
+public class OpenAiConfig {
+
+    @Value("${spring.ai.openai.api-key}")
+    private String openAiApiKey;
+
+    @Bean
+    public ChatModel chatModel() {
+        OpenAiApi openAiApi = new OpenAiApi(openAiApiKey);
+        return new OpenAiChatModel(openAiApi, OpenAiChatOptions.builder()
+                .withModel("gpt-4")
+                .withTemperature(0.7)
+                .build());
+    }
+
+    @Bean
+    public ChatClient chatClient(ChatModel chatModel) {
+        return ChatClient.builder(chatModel).build();
+    }
+}
+```
+
+Update `application.properties` to switch providers:
+
+```properties
+# For Azure OpenAI with OAuth2
+spring.ai.llm.provider=azure-oauth
+
+# For OpenAI
+# spring.ai.llm.provider=openai
+# spring.ai.openai.api-key=your-openai-api-key
+```
+
+Annotate the Azure configuration class with a condition:
+
+```java
+@Configuration
+@ConditionalOnProperty(name = "spring.ai.llm.provider", havingValue = "azure-oauth")
+public class AiConfig {
+    // Same as above
+}
+```
+
+With this setup, your application code (e.g., the `ChatController`) remains unchanged. You switch LLMs by modifying the `spring.ai.llm.provider` property and providing the necessary credentials or configuration for the new provider.
+
+### How It Works
+
+- **OAuth2 Authentication**: The `TokenCredential` obtains an access token, which the custom `OkHttpClient` adds to the `Authorization` header as `Bearer <token>`. Azure OpenAI accepts this token for authentication, as per its REST API reference.
+- **Spring AI Integration**: The `AzureOpenAiApi` is built with the customized HTTP client, and the `AzureOpenAiChatModel` uses it to communicate with Azure OpenAI.
+- **Vendor Neutrality**: The `ChatClient` abstraction ensures that your application logic depends only on Spring AI’s interfaces, not on Azure-specific code. Switching providers involves only configuration changes.
+
+### Considerations
+
+- **Token Management**: The current example uses a synchronous token fetch, which doesn’t handle token expiration. In production, implement token refresh logic using a token cache or asynchronous token retrieval.
+- **Security**: Store credentials securely (e.g., using Spring Vault or environment variables) instead of plain text in properties files.
+- **Error Handling**: Add robust error handling for token acquisition and API calls.
+
+### Conclusion
+
+You can access the Azure OpenAI model in your Spring Boot chatbot application using Spring AI with OAuth2 credentials by customizing the `AzureOpenAiApi` to use a token-based HTTP client. This approach avoids API keys and maintains vendor neutrality through Spring AI’s `ChatClient` abstraction and conditional configuration, allowing you to switch to other LLMs by adjusting properties without altering your core application code.
