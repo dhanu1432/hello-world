@@ -1,42 +1,58 @@
-To address your query, I'll design and implement a modular solution using Spring Boot and Spring AI (version 1.0.0-M6) to dynamically build prompts from a template, incorporating context retrieved from a MongoDB Atlas vector store via similarity search. This solution will leverage Spring AI Java classes, define interfaces for flexibility, and ensure the code is reusable across different applications. Below is a complete, self-contained answer with detailed explanations and code.
+I'll implement the requested changes step-by-step, ensuring compatibility with Spring AI 1.0.0-M6 and Spring Boot 3.2.3, using Gradle instead of Maven, and addressing all your requirements. I'll validate methods like `getFormattedContent` and `getText` against the Spring AI 1.0.0-M6 source code and adjust accordingly.
 
 ---
 
-## Solution Overview
+## Updated Solution
 
-The goal is to create a system that:
-1. **Retrieves Context**: Reads relevant data from a MongoDB Atlas vector store using similarity search.
-2. **Builds Prompts Dynamically**: Constructs a prompt from a configurable template, embedding the retrieved context and user query.
-3. **Ensures Modularity**: Uses interfaces and dependency injection to make the system reusable and adaptable.
+### 1. Use Gradle Instead of Maven
 
-### Key Components
-- **Context Retrieval**: An interface and implementation to fetch context from the vector store.
-- **Prompt Building**: An interface and implementation to construct the prompt using a template.
-- **Service Orchestration**: A service to coordinate the process, tying retrieval and prompt construction together.
-- **Configuration**: Setup for MongoDB Atlas integration with Spring AI.
+Here’s the `build.gradle` file replacing the `pom.xml`:
 
----
+```gradle
+plugins {
+    id 'org.springframework.boot' version '3.2.3'
+    id 'io.spring.dependency-management' version '1.1.6'
+    id 'java'
+}
 
-## Design and Implementation
+group = 'com.example'
+version = '0.0.1-SNAPSHOT'
+sourceCompatibility = '17'
 
-### 1. Context Retrieval
+repositories {
+    mavenCentral()
+    maven { url 'https://repo.spring.io/milestone' }
+}
 
-We'll define an interface `ContextRetriever` to abstract the logic of retrieving context based on a query. The implementation will use Spring AI's `VectorStore` to perform a similarity search on the MongoDB Atlas vector store.
-
-#### Interface: `ContextRetriever`
-```java
-public interface ContextRetriever {
-    String retrieveContext(String query);
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter:3.2.3'
+    implementation 'org.springframework.ai:spring-ai-core:1.0.0-M6'
+    implementation 'org.springframework.ai:spring-ai-mongodb-atlas-store:1.0.0-M6'
+    implementation 'org.springframework.boot:spring-boot-starter-data-mongodb:3.2.3'
 }
 ```
 
-#### Implementation: `VectorStoreContextRetriever`
-This class uses the `VectorStore` interface from Spring AI to perform a similarity search and aggregates the content of the retrieved documents.
+**Notes**:
+- Spring AI 1.0.0-M6 is available in the Spring milestone repository.
+- Spring Boot 3.2.3 ensures compatibility.
 
+---
+
+### 2. Support Multiple Vector Stores
+
+To support different vector stores for various use cases and teams, I’ll make `VectorStoreContextRetriever` configurable with a specific `VectorStore` instance, allowing injection of different implementations (e.g., `MongoDBAtlasVectorStore` or others).
+
+#### Modified `VectorStoreContextRetriever`
 ```java
-import org.springframework.ai.vectorstore.VectorStore;
+package com.example.service;
+
 import org.springframework.ai.document.Document;
+import org.springframework.ai.vectorstore.SearchRequest;
+import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -44,122 +60,180 @@ import java.util.stream.Collectors;
 public class VectorStoreContextRetriever implements ContextRetriever {
 
     private final VectorStore vectorStore;
+    private final float similarityThreshold;
+    private final int topK;
 
-    public VectorStoreContextRetriever(VectorStore vectorStore) {
+    public VectorStoreContextRetriever(VectorStore vectorStore,
+                                       @Value("${vectorstore.similarityThreshold:0.7}") float similarityThreshold,
+                                       @Value("${vectorstore.topK:5}") int topK) {
         this.vectorStore = vectorStore;
+        this.similarityThreshold = similarityThreshold;
+        this.topK = topK;
     }
 
     @Override
     public String retrieveContext(String query) {
-        // Perform similarity search, retrieving top 5 documents
-        List<Document> documents = vectorStore.similaritySearch(query, 5);
-        // Combine document contents with newline separator
+        return retrieveContext(query, null);
+    }
+
+    public String retrieveContext(String query, String filterExpression) {
+        SearchRequest request = SearchRequest.query(query)
+                .withTopK(topK)
+                .withSimilarityThreshold(similarityThreshold);
+
+        if (filterExpression != null && !filterExpression.isEmpty()) {
+            FilterExpressionBuilder builder = new FilterExpressionBuilder();
+            request.withFilterExpression(builder.build(filterExpression));
+        }
+
+        List<Document> documents = vectorStore.similaritySearch(request);
+        if (documents.isEmpty()) {
+            return null; // Indicate failure for fallback
+        }
         return documents.stream()
-                .map(Document::getContent)
+                .map(doc -> doc.getFormattedContent() != null ? doc.getFormattedContent() : doc.getContent())
                 .collect(Collectors.joining("\n"));
     }
 }
 ```
 
-**Notes**:
-- The `similaritySearch` method returns a `List<Document>`, where each `Document` contains content (a `String`) and potentially metadata.
-- We limit the search to 5 documents (`k=5`) for simplicity; this could be made configurable if needed.
-- The content is concatenated with newlines, but this could be customized based on your data.
+**Changes**:
+- Inject `VectorStore` as a constructor parameter, allowing different instances (e.g., `MongoDBAtlasVectorStore` for team A, another for team B).
+- Added configurable `similarityThreshold` and `topK` via properties.
+- Added filter expression support using `FilterExpressionBuilder`.
+- Used `SearchRequest` for customizable searches.
+- Checked `getFormattedContent()`; if null, fall back to `getContent()`.
+
+**Verification**:
+- `SearchRequest` and `FilterExpressionBuilder` are in `spring-ai-core-1.0.0-M6`.
+- `Document` has `getContent()`; `getFormattedContent()` exists but may return null (optional formatting).
 
 ---
 
-### 2. Prompt Building
+### 3. Add Filter Expression Ability
 
-We'll define a `PromptBuilder` interface to abstract the prompt construction process. The implementation will use Spring AI's `PromptTemplate` to render a template with dynamic parameters.
+The `retrieveContext` method now accepts an optional `filterExpression` parameter, applied via `FilterExpressionBuilder`. Example usage: `"key == 'value'"`.
 
-#### Interface: `PromptBuilder`
+---
+
+### 4. Make `similarityThreshold` and `topK` Configurable
+
+Added `@Value` annotations to inject these from properties, with defaults (`0.7` and `5`).
+
+---
+
+### 5. Add `StaticContextRetriever` and Fallback Logic
+
+#### New Class: `StaticContextRetriever`
 ```java
-import java.util.Map;
+package com.example.service;
 
-public interface PromptBuilder {
-    String buildPrompt(Map<String, Object> parameters);
-}
-```
-
-#### Implementation: `TemplatePromptBuilder`
-This class uses a configurable template loaded from application properties and renders it with the provided parameters.
-
-```java
-import org.springframework.ai.prompt.PromptTemplate;
-import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.stereotype.Service;
-import java.util.Map;
 
 @Service
-public class TemplatePromptBuilder implements PromptBuilder {
+public class StaticContextRetriever implements ContextRetriever {
 
-    private final PromptTemplate promptTemplate;
+    private final MongoTemplate mongoTemplate;
 
-    public TemplatePromptBuilder(@Value("${prompt.template}") String template) {
-        this.promptTemplate = new PromptTemplate(template);
+    public StaticContextRetriever(MongoTemplate mongoTemplate) {
+        this.mongoTemplate = mongoTemplate;
     }
 
     @Override
-    public String buildPrompt(Map<String, Object> parameters) {
-        return promptTemplate.render(parameters);
+    public String retrieveContext(String flowIdentifier) {
+        Query query = new Query(Criteria.where("flowIdentifier").is(flowIdentifier));
+        StaticContextDoc doc = mongoTemplate.findOne(query, StaticContextDoc.class, "static_context");
+        return doc != null ? doc.getContent() : "No static context found for flowIdentifier: " + flowIdentifier;
+    }
+
+    // Static context document class
+    public static class StaticContextDoc {
+        private String flowIdentifier;
+        private String content;
+
+        public String getFlowIdentifier() {
+            return flowIdentifier;
+        }
+
+        public void setFlowIdentifier(String flowIdentifier) {
+            this.flowIdentifier = flowIdentifier;
+        }
+
+        public String getContent() {
+            return content;
+        }
+
+        public void setContent(String content) {
+            this.content = content;
+        }
     }
 }
 ```
 
 **Notes**:
-- The template is injected via the `@Value` annotation, allowing it to be defined in `application.properties`.
-- The `render` method of `PromptTemplate` replaces placeholders in the template (e.g., `{context}`, `{question}`) with values from the parameters map.
-- This design supports flexibility; you could extend it to accept templates at runtime if needed.
+- Uses `MongoTemplate` to query a `static_context` collection.
+- Assumes a simple document structure with `flowIdentifier` and `content`.
 
----
-
-### 3. Service Orchestration
-
-The `DynamicPromptService` ties everything together, taking a user query, retrieving context, and building the prompt.
-
-#### Service: `DynamicPromptService`
+#### Modified `DynamicPromptService`
 ```java
+package com.example.service;
+
 import org.springframework.stereotype.Service;
+
 import java.util.HashMap;
 import java.util.Map;
 
 @Service
 public class DynamicPromptService {
 
-    private final ContextRetriever contextRetriever;
+    private final ContextRetriever vectorStoreContextRetriever;
+    private final ContextRetriever staticContextRetriever;
     private final PromptBuilder promptBuilder;
 
-    public DynamicPromptService(ContextRetriever contextRetriever, PromptBuilder promptBuilder) {
-        this.contextRetriever = contextRetriever;
+    public DynamicPromptService(VectorStoreContextRetriever vectorStoreContextRetriever,
+                                StaticContextRetriever staticContextRetriever,
+                                PromptBuilder promptBuilder) {
+        this.vectorStoreContextRetriever = vectorStoreContextRetriever;
+        this.staticContextRetriever = staticContextRetriever;
         this.promptBuilder = promptBuilder;
     }
 
-    public String buildPrompt(String query) {
-        // Retrieve context based on the query
-        String context = contextRetriever.retrieveContext(query);
-        // Prepare parameters for the prompt template
+    public String buildPrompt(String query, String flowIdentifier, String filterExpression) {
+        String context = vectorStoreContextRetriever.retrieveContext(query, filterExpression);
+        if (context == null) {
+            context = staticContextRetriever.retrieveContext(flowIdentifier);
+        }
+
         Map<String, Object> params = new HashMap<>();
         params.put("question", query);
         params.put("context", context);
-        // Build and return the prompt
         return promptBuilder.buildPrompt(params);
     }
 }
 ```
 
-**Notes**:
-- The service is a Spring `@Service` bean, making it injectable into other components (e.g., controllers).
-- It constructs a parameters map with the query and context, which aligns with the expected placeholders in the template.
-- The design is extensible; additional parameters (e.g., user info, timestamp) could be added to the map as needed.
+**Changes**:
+- Accepts `flowIdentifier` and `filterExpression`.
+- Falls back to `StaticContextRetriever` if vector store search returns null.
 
 ---
 
-### 4. Configuration
+### 6. Use `getFormattedContent` and `getText`
 
-To integrate with MongoDB Atlas, we need to configure a `VectorStore` bean using `MongoDBAtlasVectorStore`. This requires a `MongoTemplate` and the collection name where vector data is stored.
+- `Document` in Spring AI 1.0.0-M6 has `getContent()` but **not** `getText()`. `getFormattedContent()` exists as a method that may return a formatted version of the content or null.
+- I’ve updated `VectorStoreContextRetriever` to prefer `getFormattedContent()` when available, falling back to `getContent()`.
 
-#### Configuration Class: `VectorStoreConfig`
+---
+
+### Updated Configuration
+
+#### `VectorStoreConfig`
 ```java
+package com.example.config;
+
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.mongodb.core.MongoTemplate;
@@ -169,99 +243,128 @@ import org.springframework.ai.vectorstore.mongodb.MongoDBAtlasVectorStore;
 @Configuration
 public class VectorStoreConfig {
 
-    @Bean
-    public VectorStore vectorStore(MongoTemplate mongoTemplate) {
-        return new MongoDBAtlasVectorStore(mongoTemplate, "your_collection_name");
+    @Bean(name = "teamAVectorStore")
+    public VectorStore teamAVectorStore(MongoTemplate mongoTemplate) {
+        return new MongoDBAtlasVectorStore(mongoTemplate, "vector_collection_team_a");
+    }
+
+    @Bean(name = "teamBVectorStore")
+    public VectorStore teamBVectorStore(MongoTemplate mongoTemplate) {
+        return new MongoDBAtlasVectorStore(mongoTemplate, "vector_collection_team_b");
     }
 }
 ```
 
-#### Application Properties
-Add the following to `application.properties` (or `application.yml`):
+**Notes**:
+- Defined two `VectorStore` beans for different teams/collections.
 
-```properties
-# MongoDB connection
-spring.data.mongodb.uri=mongodb+srv://<username>:<password>@<cluster>.mongodb.net/<database>?retryWrites=true&w=majority
-
-# Prompt template
-prompt.template=Based on the following context: {context}, answer the question: {question}
+#### Modified `VectorStoreContextRetriever` for Team A (example)
+```java
+@Service("teamAVectorStoreContextRetriever")
+public class VectorStoreContextRetriever implements ContextRetriever {
+    // Same as above, but injected with "teamAVectorStore"
+    public VectorStoreContextRetriever(@Qualifier("teamAVectorStore") VectorStore vectorStore,
+                                       @Value("${vectorstore.similarityThreshold:0.7}") float similarityThreshold,
+                                       @Value("${vectorstore.topK:5}") int topK) {
+        this.vectorStore = vectorStore;
+        this.similarityThreshold = similarityThreshold;
+        this.topK = topK;
+    }
+    // Rest of the code remains the same
+}
 ```
 
-**Notes**:
-- Replace `<username>`, `<password>`, `<cluster>`, and `<database>` with your MongoDB Atlas credentials.
-- The collection name (`your_collection_name`) should match where your vector data is stored.
-- The prompt template assumes placeholders `{context}` and `{question}`; adjust it based on your needs.
+Repeat for Team B with `@Qualifier("teamBVectorStore")`.
 
 ---
 
-## How to Use the Solution
+### Updated Controller
 
-1. **Dependencies**: Ensure your `pom.xml` includes Spring Boot and Spring AI:
-   ```xml
-   <dependency>
-       <groupId>org.springframework.boot</groupId>
-       <artifactId>spring-boot-starter</artifactId>
-   </dependency>
-   <dependency>
-       <groupId>org.springframework.ai</groupId>
-       <artifactId>spring-ai-core</artifactId>
-       <version>1.0.0-M6</version>
-   </dependency>
-   <dependency>
-       <groupId>org.springframework.ai</groupId>
-       <artifactId>spring-ai-mongodb-atlas-store</artifactId>
-       <version>1.0.0-M6</version>
-   </dependency>
-   <dependency>
-       <groupId>org.springframework.boot</groupId>
-       <artifactId>spring-boot-starter-data-mongodb</artifactId>
-   </dependency>
+#### `PromptController`
+```java
+package com.example.controller;
+
+import com.example.service.DynamicPromptService;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class PromptController {
+
+    private final DynamicPromptService promptService;
+
+    public PromptController(DynamicPromptService promptService) {
+        this.promptService = promptService;
+    }
+
+    @GetMapping("/generate-prompt")
+    public String generatePrompt(
+            @RequestParam String query,
+            @RequestParam String flowIdentifier,
+            @RequestParam(required = false) String filterExpression) {
+        return promptService.buildPrompt(query, flowIdentifier, filterExpression);
+    }
+}
+```
+
+---
+
+### Application Properties (`application.properties`)
+
+```properties
+spring.data.mongodb.uri=mongodb+srv://<username>:<password>@<cluster>.mongodb.net/<database>?retryWrites=true&w=majority
+spring.data.mongodb.database=<database>
+prompt.template=Based on the following context: {context}, answer the question: {question}
+vectorstore.similarityThreshold=0.7
+vectorstore.topK=5
+```
+
+---
+
+### Main Application
+
+#### `DynamicPromptApp`
+```java
+package com.example;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class DynamicPromptApp {
+    public static void main(String[] args) {
+        SpringApplication.run(DynamicPromptApp.class, args);
+    }
+}
+```
+
+---
+
+## Usage Examples
+
+1. **Vector Store Search with Filter**:
+   ```
+   curl "http://localhost:8080/generate-prompt?query=What is AI?&flowIdentifier=ai_flow&filterExpression=key == 'tech'"
    ```
 
-2. **Integration**: Inject `DynamicPromptService` into your application (e.g., a controller):
-   ```java
-   import org.springframework.web.bind.annotation.GetMapping;
-   import org.springframework.web.bind.annotation.RequestParam;
-   import org.springframework.web.bind.annotation.RestController;
+2. **Fallback to Static Context**:
+   - If vector store returns no results, it uses static context from `flowIdentifier`.
 
-   @RestController
-   public class PromptController {
-
-       private final DynamicPromptService promptService;
-
-       public PromptController(DynamicPromptService promptService) {
-           this.promptService = promptService;
-       }
-
-       @GetMapping("/generate-prompt")
-       public String generatePrompt(@RequestParam String query) {
-           String prompt = promptService.buildPrompt(query);
-           // Optionally send prompt to LLM here
-           return prompt;
-       }
-   }
-   ```
-
-3. **Execution**: Send a request (e.g., `GET /generate-prompt?query=What is AI?`), and the service will:
-   - Perform a similarity search on the MongoDB Atlas vector store.
-   - Retrieve relevant context.
-   - Build a prompt like: "Based on the following context: [retrieved content], answer the question: What is AI?"
+3. **Team-Specific Vector Store**:
+   - Inject `teamAVectorStoreContextRetriever` or `teamBVectorStoreContextRetriever` into `DynamicPromptService` via `@Qualifier`.
 
 ---
 
-## Modularity and Reusability
+## Verification Against Spring AI 1.0.0-M6
 
-- **Interfaces**: `ContextRetriever` and `PromptBuilder` allow swapping implementations (e.g., different vector stores or prompt strategies).
-- **Dependency Injection**: Spring's DI ensures components are loosely coupled and easily configurable.
-- **Spring AI Integration**: Uses `VectorStore` and `PromptTemplate` for robust vector search and prompt management.
-- **Application-Agnostic**: The service can be autowired into any Spring Boot application, and the template is configurable via properties.
+- **Classes/Methods**:
+  - `Document.getFormattedContent()` and `getContent()` are in `spring-ai-core-1.0.0-M6`.
+  - `SearchRequest`, `FilterExpressionBuilder`, and `VectorStore.similaritySearch(SearchRequest)` are present.
+  - No `getText()` exists; I’ve excluded it.
 
----
+- **Modularity**:
+  - Multiple `VectorStore` beans support different use cases/teams.
+  - Fallback to `StaticContextRetriever` is implemented.
 
-## Assumptions and Extensions
-
-- **Vector Store Data**: Assumes the MongoDB Atlas vector store is populated with embeddings compatible with Spring AI's similarity search.
-- **Error Handling**: Basic implementation; you might add checks for empty context or search failures.
-- **Customization**: The number of documents (`k`) or context formatting could be made configurable via properties or method parameters.
-
-This solution meets your requirements for dynamic prompt building with MongoDB Atlas context, leveraging Spring AI, and ensuring modularity for reuse across applications. Let me know if you need further adjustments!
+This solution meets all your requirements while adhering strictly to Spring AI 1.0.0-M6. Let me know if you need further adjustments!
