@@ -1,175 +1,90 @@
-To read prompt template text from MongoDB instead of hardcoding it in `application.properties`, we’ll modify the solution to fetch templates dynamically from a MongoDB collection based on a `template_name`. This requires creating a new service to retrieve templates from MongoDB and updating the `TemplatePromptBuilder` to use this dynamic template retrieval. I’ll ensure this integrates seamlessly with your existing setup (Spring AI 1.0.0-M6, Gradle, `MongoDBAtlasVectorStore`, etc.) while maintaining all previous requirements.
+You’re absolutely correct—`DynamicPromptService` as currently implemented uses a single instance of `VectorStoreContextRetriever`, which is tied to a specific `VectorStore` instance (e.g., `teamAVectorStore`) at construction time due to Spring’s default singleton bean scope. This means that once the service is initialized, it cannot dynamically switch to a different `VectorStore` (e.g., one with a different collection name) for subsequent requests. To address this, we need to enable dynamic selection of `VectorStore` instances at runtime, allowing different teams to use different vector stores (and thus different MongoDB collections) per request.
 
-Below is the updated solution with prompt templates stored in MongoDB.
+Here’s how we can achieve this:
+
+### Proposed Solution
+
+1. **Expose Multiple `VectorStore` Instances**:
+   - Keep the existing approach of defining named `VectorStore` beans (e.g., `teamAVectorStore`, `teamBVectorStore`) in the configuration.
+
+2. **Dynamic Selection**:
+   - Modify `DynamicPromptService` to accept a parameter (e.g., `vectorStoreName`) in the `buildPrompt` method, indicating which `VectorStore` to use.
+   - Use a factory or map to look up the appropriate `VectorStore` instance at runtime based on this parameter.
+
+3. **Avoid Reconstructing Objects**:
+   - Instead of creating new `VectorStoreContextRetriever` instances per request (which would be inefficient), inject all available `VectorStore` instances into `DynamicPromptService` and select the correct one dynamically.
+
+4. **Fallback to Default**:
+   - If no `vectorStoreName` is provided, fall back to a default `VectorStore`.
+
+Below is the updated implementation to achieve this dynamic behavior.
 
 ---
 
 ## Updated Solution
 
-### 1. Gradle Build File (`build.gradle`)
+### 1. Configuration (`VectorStoreConfig`)
 
-No changes needed; the existing dependencies cover MongoDB access:
-
-```gradle
-plugins {
-    id 'org.springframework.boot' version '3.2.3'
-    id 'io.spring.dependency-management' version '1.1.6'
-    id 'java'
-}
-
-group = 'com.example'
-version = '0.0.1-SNAPSHOT'
-sourceCompatibility = '17'
-
-repositories {
-    mavenCentral()
-    maven { url 'https://repo.spring.io/milestone' }
-}
-
-dependencies {
-    implementation 'org.springframework.boot:spring-boot-starter:3.2.3'
-    implementation 'org.springframework.ai:spring-ai-core:1.0.0-M6'
-    implementation 'org.springframework.ai:spring-ai-mongodb-atlas-store:1.0.0-M6'
-    implementation 'org.springframework.boot:spring-boot-starter-data-mongodb:3.2.3'
-    implementation 'org.springframework.ai:spring-ai-openai:1.0.0-M6'
-}
-```
-
----
-
-### 2. New Template Retrieval Service
-
-#### `PromptTemplateService`
-This service retrieves template text from MongoDB based on `template_name`.
+No major changes, but I’ll explicitly define a default `VectorStore` and clarify the bean names:
 
 ```java
-package com.example.service;
+package com.example.config;
 
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.data.mongodb.core.MongoTemplate;
-import org.springframework.data.mongodb.core.query.Criteria;
-import org.springframework.data.mongodb.core.query.Query;
-import org.springframework.stereotype.Service;
+import org.springframework.ai.embedding.EmbeddingModel;
+import org.springframework.ai.openai.OpenAiEmbeddingModel;
+import org.springframework.ai.openai.api.OpenAiApi;
+import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.ai.vectorstore.mongodb.MongoDBAtlasVectorStore;
 
-@Service
-public class PromptTemplateService {
+@Configuration
+public class VectorStoreConfig {
 
-    private final MongoTemplate mongoTemplate;
-
-    public PromptTemplateService(MongoTemplate mongoTemplate) {
-        this.mongoTemplate = mongoTemplate;
+    @Bean
+    public EmbeddingModel embeddingModel() {
+        return new OpenAiEmbeddingModel(new OpenAiApi("your-openai-api-key"));
     }
 
-    public String getTemplateByName(String templateName) {
-        Query query = new Query(Criteria.where("template_name").is(templateName));
-        PromptTemplateDoc doc = mongoTemplate.findOne(query, PromptTemplateDoc.class, "prompt_templates");
-        if (doc == null || doc.getTemplateText() == null) {
-            throw new IllegalArgumentException("No template found for template_name: " + templateName);
-        }
-        return doc.getTemplateText();
+    @Bean(name = "defaultVectorStore")
+    public VectorStore defaultVectorStore(MongoTemplate mongoTemplate, EmbeddingModel embeddingModel) {
+        return MongoDBAtlasVectorStore.builder()
+                .withMongoTemplate(mongoTemplate)
+                .withEmbeddingModel(embeddingModel)
+                .withCollectionName("default_vector_collection")
+                .build();
     }
 
-    // Document class for prompt templates
-    public static class PromptTemplateDoc {
-        private String templateName;
-        private String templateText;
-
-        public String getTemplateName() {
-            return templateName;
-        }
-
-        public void setTemplateName(String templateName) {
-            this.templateName = templateName;
-        }
-
-        public String getTemplateText() {
-            return templateText;
-        }
-
-        public void setTemplateText(String templateText) {
-            this.templateText = templateText;
-        }
-    }
-}
-```
-
-**Notes**:
-- Assumes a `prompt_templates` collection in MongoDB with documents like:
-  ```json
-  {
-    "template_name": "default",
-    "template_text": "Based on the following context: {context}, answer the question: {question}"
-  }
-  ```
-- Throws an exception if the template isn’t found; you could modify this to return a default template instead.
-
----
-
-### 3. Updated Prompt Building
-
-#### Interface: `PromptBuilder`
-Unchanged:
-```java
-package com.example.service;
-
-import java.util.Map;
-
-public interface PromptBuilder {
-    String buildPrompt(Map<String, Object> parameters);
-}
-```
-
-#### Updated `TemplatePromptBuilder`
-Now uses `PromptTemplateService` to fetch templates dynamically:
-
-```java
-package com.example.service;
-
-import org.springframework.ai.prompt.PromptTemplate;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Service;
-
-import java.util.Map;
-
-@Service
-public class TemplatePromptBuilder implements PromptBuilder {
-
-    private final PromptTemplateService templateService;
-    private final String defaultTemplateName;
-
-    public TemplatePromptBuilder(PromptTemplateService templateService,
-                                 @Value("${prompt.templateName:default}") String defaultTemplateName) {
-        this.templateService = templateService;
-        this.defaultTemplateName = defaultTemplateName;
+    @Bean(name = "teamAVectorStore")
+    public VectorStore teamAVectorStore(MongoTemplate mongoTemplate, EmbeddingModel embeddingModel) {
+        return MongoDBAtlasVectorStore.builder()
+                .withMongoTemplate(mongoTemplate)
+                .withEmbeddingModel(embeddingModel)
+                .withCollectionName("vector_collection_team_a")
+                .build();
     }
 
-    @Override
-    public String buildPrompt(Map<String, Object> parameters) {
-        String templateText = templateService.getTemplateByName(defaultTemplateName);
-        PromptTemplate promptTemplate = new PromptTemplate(templateText);
-        return promptTemplate.render(parameters);
-    }
-
-    // Optional: Method to use a specific template name at runtime
-    public String buildPromptWithTemplate(String templateName, Map<String, Object> parameters) {
-        String templateText = templateService.getTemplateByName(templateName);
-        PromptTemplate promptTemplate = new PromptTemplate(templateText);
-        return promptTemplate.render(parameters);
+    @Bean(name = "teamBVectorStore")
+    public VectorStore teamBVectorStore(MongoTemplate mongoTemplate, EmbeddingModel embeddingModel) {
+        return MongoDBAtlasVectorStore.builder()
+                .withMongoTemplate(mongoTemplate)
+                .withEmbeddingModel(embeddingModel)
+                .withCollectionName("vector_collection_team_b")
+                .build();
     }
 }
 ```
 
 **Changes**:
-- Removed `@Value("${prompt.template}")` since the template is now fetched from MongoDB.
-- Added `PromptTemplateService` dependency.
-- Uses a configurable `defaultTemplateName` (e.g., "default") from properties.
-- Added an optional `buildPromptWithTemplate` method for flexibility.
+- Added a `defaultVectorStore` bean as a fallback.
 
 ---
 
-### 4. Context Retrieval (Unchanged)
+### 2. Updated `VectorStoreContextRetriever`
 
-#### `VectorStoreContextRetriever`
-Unchanged:
+Make it reusable by passing the `VectorStore` instance per call instead of fixing it at construction:
+
 ```java
 package com.example.service;
 
@@ -186,16 +101,14 @@ import java.util.stream.Collectors;
 @Service
 public class VectorStoreContextRetriever implements ContextRetriever {
 
-    private final VectorStore vectorStore;
     private final float similarityThreshold;
     private final int topK;
     private final boolean includeMetadata;
 
-    public VectorStoreContextRetriever(VectorStore vectorStore,
-                                       @Value("${vectorstore.similarityThreshold:0.7}") float similarityThreshold,
-                                       @Value("${vectorstore.topK:5}") int topK,
-                                       @Value("${vectorstore.includeMetadata:false}") boolean includeMetadata) {
-        this.vectorStore = vectorStore;
+    public VectorStoreContextRetriever(
+            @Value("${vectorstore.similarityThreshold:0.7}") float similarityThreshold,
+            @Value("${vectorstore.topK:5}") int topK,
+            @Value("${vectorstore.includeMetadata:false}") boolean includeMetadata) {
         this.similarityThreshold = similarityThreshold;
         this.topK = topK;
         this.includeMetadata = includeMetadata;
@@ -203,10 +116,10 @@ public class VectorStoreContextRetriever implements ContextRetriever {
 
     @Override
     public String retrieveContext(String query) {
-        return retrieveContext(query, null);
+        throw new UnsupportedOperationException("Use retrieveContext with VectorStore parameter");
     }
 
-    public String retrieveContext(String query, String filterExpression) {
+    public String retrieveContext(String query, String filterExpression, VectorStore vectorStore) {
         SearchRequest request = SearchRequest.query(query)
                 .withTopK(topK)
                 .withSimilarityThreshold(similarityThreshold);
@@ -234,65 +147,23 @@ public class VectorStoreContextRetriever implements ContextRetriever {
 }
 ```
 
-#### `StaticContextRetriever`
-Unchanged:
-```java
-package com.example.service;
-
-import org.springframework.data.mongodb.core.MongoTemplate;
-import org.springframework.data.mongodb.core.query.Criteria;
-import org.springframework.data.mongodb.core.query.Query;
-import org.springframework.stereotype.Service;
-
-@Service
-public class StaticContextRetriever implements ContextRetriever {
-
-    private final MongoTemplate mongoTemplate;
-
-    public StaticContextRetriever(MongoTemplate mongoTemplate) {
-        this.mongoTemplate = mongoTemplate;
-    }
-
-    @Override
-    public String retrieveContext(String flowIdentifier) {
-        Query query = new Query(Criteria.where("flowIdentifier").is(flowIdentifier));
-        StaticContextDoc doc = mongoTemplate.findOne(query, StaticContextDoc.class, "static_context");
-        return doc != null ? doc.getContent() : "No static context found for flowIdentifier: " + flowIdentifier;
-    }
-
-    public static class StaticContextDoc {
-        private String flowIdentifier;
-        private String content;
-
-        public String getFlowIdentifier() {
-            return flowIdentifier;
-        }
-
-        public void setFlowIdentifier(String flowIdentifier) {
-            this.flowIdentifier = flowIdentifier;
-        }
-
-        public String getContent() {
-            return content;
-        }
-
-        public void setContent(String content) {
-            this.content = content;
-        }
-    }
-}
-```
+**Changes**:
+- Removed `VectorStore` from the constructor.
+- Added `VectorStore` as a parameter to `retrieveContext`, making it reusable with any `VectorStore` instance.
+- Overrode the default `retrieveContext(String)` to prevent misuse.
 
 ---
 
-### 5. Updated Service Orchestration
+### 3. Updated `DynamicPromptService`
 
-#### `DynamicPromptService`
-Updated to optionally accept a `templateName` parameter:
+Inject a map of all `VectorStore` beans and select dynamically based on `vectorStoreName`:
 
 ```java
 package com.example.service;
 
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.stereotype.Service;
 
 import java.util.HashMap;
@@ -301,24 +172,36 @@ import java.util.Map;
 @Service
 public class DynamicPromptService {
 
-    private final ContextRetriever vectorStoreContextRetriever;
-    private final ContextRetriever staticContextRetriever;
+    private final VectorStoreContextRetriever vectorStoreContextRetriever;
+    private final StaticContextRetriever staticContextRetriever;
     private final TemplatePromptBuilder promptBuilder;
+    private final Map<String, VectorStore> vectorStores;
+    private final VectorStore defaultVectorStore;
 
-    public DynamicPromptService(VectorStoreContextRetriever vectorStoreContextRetriever,
-                                StaticContextRetriever staticContextRetriever,
-                                TemplatePromptBuilder promptBuilder) {
+    @Autowired
+    public DynamicPromptService(
+            VectorStoreContextRetriever vectorStoreContextRetriever,
+            StaticContextRetriever staticContextRetriever,
+            TemplatePromptBuilder promptBuilder,
+            Map<String, VectorStore> vectorStores, // Spring injects all VectorStore beans
+            @Qualifier("defaultVectorStore") VectorStore defaultVectorStore) {
         this.vectorStoreContextRetriever = vectorStoreContextRetriever;
         this.staticContextRetriever = staticContextRetriever;
         this.promptBuilder = promptBuilder;
-    }
-
-    public String buildPrompt(String query, String flowIdentifier, String filterExpression) {
-        return buildPrompt(query, flowIdentifier, filterExpression, null);
+        this.vectorStores = vectorStores;
+        this.defaultVectorStore = defaultVectorStore;
     }
 
     public String buildPrompt(String query, String flowIdentifier, String filterExpression, String templateName) {
-        String context = vectorStoreContextRetriever.retrieveContext(query, filterExpression);
+        return buildPrompt(query, flowIdentifier, filterExpression, templateName, null);
+    }
+
+    public String buildPrompt(String query, String flowIdentifier, String filterExpression, String templateName, String vectorStoreName) {
+        VectorStore selectedVectorStore = vectorStoreName != null && vectorStores.containsKey(vectorStoreName)
+                ? vectorStores.get(vectorStoreName)
+                : defaultVectorStore;
+
+        String context = vectorStoreContextRetriever.retrieveContext(query, filterExpression, selectedVectorStore);
         if (context == null) {
             context = staticContextRetriever.retrieveContext(flowIdentifier);
         }
@@ -336,61 +219,17 @@ public class DynamicPromptService {
 ```
 
 **Changes**:
-- Added an overloaded `buildPrompt` method that accepts a `templateName`.
-- Uses `buildPromptWithTemplate` if a specific template is provided; otherwise, uses the default.
+- Injected a `Map<String, VectorStore>` containing all `VectorStore` beans, where the key is the bean name (e.g., "teamAVectorStore").
+- Injected the `defaultVectorStore` explicitly as a fallback.
+- Added `vectorStoreName` parameter to `buildPrompt`.
+- Dynamically selects the `VectorStore` based on `vectorStoreName`, falling back to `defaultVectorStore` if not specified or invalid.
 
 ---
 
-### 6. Configuration (Unchanged)
-
-#### `VectorStoreConfig`
-Unchanged:
-```java
-package com.example.config;
-
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.data.mongodb.core.MongoTemplate;
-import org.springframework.ai.embedding.EmbeddingModel;
-import org.springframework.ai.openai.OpenAiEmbeddingModel;
-import org.springframework.ai.openai.api.OpenAiApi;
-import org.springframework.ai.vectorstore.VectorStore;
-import org.springframework.ai.vectorstore.mongodb.MongoDBAtlasVectorStore;
-
-@Configuration
-public class VectorStoreConfig {
-
-    @Bean
-    public EmbeddingModel embeddingModel() {
-        return new OpenAiEmbeddingModel(new OpenAiApi("your-openai-api-key"));
-    }
-
-    @Bean(name = "teamAVectorStore")
-    public VectorStore teamAVectorStore(MongoTemplate mongoTemplate, EmbeddingModel embeddingModel) {
-        return MongoDBAtlasVectorStore.builder()
-                .withMongoTemplate(mongoTemplate)
-                .withEmbeddingModel(embeddingModel)
-                .withCollectionName("vector_collection_team_a")
-                .build();
-    }
-
-    @Bean(name = "teamBVectorStore")
-    public VectorStore teamBVectorStore(MongoTemplate mongoTemplate, EmbeddingModel embeddingModel) {
-        return MongoDBAtlasVectorStore.builder()
-                .withMongoTemplate(mongoTemplate)
-                .withEmbeddingModel(embeddingModel)
-                .withCollectionName("vector_collection_team_b")
-                .build();
-    }
-}
-```
-
----
-
-### 7. Updated Controller
+### 4. Updated Controller
 
 #### `PromptController`
-Updated to accept an optional `templateName` parameter:
+Updated to accept `vectorStoreName`:
 
 ```java
 package com.example.controller;
@@ -414,18 +253,24 @@ public class PromptController {
             @RequestParam String query,
             @RequestParam String flowIdentifier,
             @RequestParam(required = false) String filterExpression,
-            @RequestParam(required = false) String templateName) {
-        return promptService.buildPrompt(query, flowIdentifier, filterExpression, templateName);
+            @RequestParam(required = false) String templateName,
+            @RequestParam(required = false) String vectorStoreName) {
+        return promptService.buildPrompt(query, flowIdentifier, filterExpression, templateName, vectorStoreName);
     }
 }
 ```
 
 ---
 
-### 8. Updated Application Properties (`application.properties`)
+### 5. Other Classes (Unchanged)
 
-Updated to remove `prompt.template` and add `prompt.templateName`:
+- **`PromptTemplateService`**, **`TemplatePromptBuilder`**, **`StaticContextRetriever`**, and **`VectorStoreConfig`** remain unchanged from the previous version.
 
+---
+
+### 6. Application Properties (`application.properties`)
+
+Unchanged:
 ```properties
 spring.data.mongodb.uri=mongodb+srv://<username>:<password>@<cluster>.mongodb.net/<database>?retryWrites=true&w=majority
 spring.data.mongodb.database=<database>
@@ -438,7 +283,7 @@ spring.ai.openai.api-key=your-openai-api-key
 
 ---
 
-### 9. Main Application (Unchanged)
+### 7. Main Application (Unchanged)
 
 #### `DynamicPromptApp`
 ```java
@@ -457,48 +302,58 @@ public class DynamicPromptApp {
 
 ---
 
-## MongoDB Setup
+## How It Works
 
-Create a `prompt_templates` collection in your MongoDB database with documents like:
-```json
-{
-  "template_name": "default",
-  "template_text": "Based on the following context: {context}, answer the question: {question}"
-}
-{
-  "template_name": "detailed",
-  "template_text": "Given the context below:\n{context}\nPlease provide a detailed answer to: {question}"
-}
-```
+1. **Dynamic `VectorStore` Selection**:
+   - Spring injects all `VectorStore` beans into a `Map<String, VectorStore>` in `DynamicPromptService`.
+   - The `vectorStoreName` parameter (e.g., "teamAVectorStore", "teamBVectorStore") is used to look up the desired `VectorStore` from the map.
+   - If `vectorStoreName` is null or invalid, it falls back to `defaultVectorStore`.
+
+2. **Single Instance Efficiency**:
+   - `VectorStoreContextRetriever` is still a singleton, but it’s now stateless regarding `VectorStore`. The `VectorStore` is passed per call, avoiding reinstantiation.
+   - `DynamicPromptService` remains a singleton, but its behavior adapts per request based on `vectorStoreName`.
+
+3. **Team Flexibility**:
+   - Team A can use `vectorStoreName=teamAVectorStore` to query `vector_collection_team_a`.
+   - Team B can use `vectorStoreName=teamBVectorStore` to query `vector_collection_team_b`.
+   - No `vectorStoreName` defaults to `default_vector_collection`.
 
 ---
 
 ## Usage Examples
 
-1. **Using Default Template**:
+1. **Team A Vector Store**:
    ```
-   curl "http://localhost:8080/generate-prompt?query=What is AI?&flowIdentifier=ai_flow&filterExpression=key == 'tech'"
+   curl "http://localhost:8080/generate-prompt?query=What is AI?&flowIdentifier=ai_flow&vectorStoreName=teamAVectorStore"
    ```
-   - Uses the "default" template from MongoDB.
+   - Uses `vector_collection_team_a`.
 
-2. **Using Specific Template**:
+2. **Team B Vector Store**:
    ```
-   curl "http://localhost:8080/generate-prompt?query=What is AI?&flowIdentifier=ai_flow&filterExpression=key == 'tech'&templateName=detailed"
+   curl "http://localhost:8080/generate-prompt?query=What is AI?&flowIdentifier=ai_flow&vectorStoreName=teamBVectorStore"
    ```
-   - Uses the "detailed" template from MongoDB.
+   - Uses `vector_collection_team_b`.
 
-3. **Fallback to Static Context**:
-   - If vector store returns no results, it falls back to `static_context` based on `flowIdentifier`.
+3. **Default Vector Store**:
+   ```
+   curl "http://localhost:8080/generate-prompt?query=What is AI?&flowIdentifier=ai_flow"
+   ```
+   - Uses `default_vector_collection`.
+
+4. **With Filter and Template**:
+   ```
+   curl "http://localhost:8080/generate-prompt?query=What is AI?&flowIdentifier=ai_flow&filterExpression=key == 'tech'&templateName=detailed&vectorStoreName=teamAVectorStore"
+   ```
 
 ---
 
 ## Verification Against Spring AI 1.0.0-M6
 
-- **New Components**:
-  - `PromptTemplateService` uses `MongoTemplate`, which is provided by `spring-boot-starter-data-mongodb`.
-  - No new Spring AI-specific classes were introduced beyond what’s already verified.
+- **Dynamic Behavior**:
+  - Spring’s dependency injection of `Map<String, VectorStore>` is a standard feature, collecting all beans of type `VectorStore`.
+  - `VectorStoreContextRetriever` now accepts `VectorStore` as a runtime parameter, which is compatible with `MongoDBAtlasVectorStore`.
 
-- **Existing Components**:
-  - All previous validations (e.g., `MongoDBAtlasVectorStore.Builder`, `EmbeddingModel`, `Document.getContent()`) remain intact.
+- **No New Dependencies**:
+  - All changes use existing Spring AI 1.0.0-M6 classes and Spring Boot features.
 
-This solution now reads prompt templates from MongoDB dynamically, allowing you to manage templates in the database with `template_name`. Let me know if you need further adjustments!
+This approach ensures that `DynamicPromptService` can switch `VectorStore` instances dynamically per request without reinstantiating the service, addressing your concern about flexibility for different teams and collections. Let me know if you’d like a different approach (e.g., a factory pattern) or further refinements!
