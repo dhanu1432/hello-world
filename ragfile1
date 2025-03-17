@@ -1,0 +1,518 @@
+Your question is insightful and touches on a fundamental design decision in software architecture: whether two classes with different purposes but similar roles should share the same interface. Let’s evaluate whether it makes sense for `StaticContextRetriever` and `VectorStoreContextRetriever` to implement the same `ContextRetriever` interface in your current design, considering their functionality, intent, and usage in the `DynamicPromptService`.
+
+---
+
+## Current Design Recap
+
+- **`ContextRetriever` Interface**:
+  ```java
+  public interface ContextRetriever {
+      String retrieveContext(String query);
+  }
+  ```
+
+- **`VectorStoreContextRetriever`**:
+  - Retrieves context dynamically from a vector store (e.g., `MongoDBAtlasVectorStore`) using similarity search.
+  - Extended with an overloaded method: `retrieveContext(String query, String filterExpression, VectorStore vectorStore)`.
+  - Designed for vector-based, query-driven context retrieval.
+
+- **`StaticContextRetriever`**:
+  - Retrieves static context from a MongoDB collection based on a `flowIdentifier`.
+  - Uses a simple key-based lookup (not similarity search).
+
+- **`DynamicPromptService`**:
+  - Uses both retrievers, falling back to `StaticContextRetriever` if `VectorStoreContextRetriever` returns null.
+  - Currently passes different parameters (`query` vs. `flowIdentifier`).
+
+---
+
+## Does It Make Sense?
+
+### Arguments For Sharing the Same Interface
+
+1. **Unified Abstraction**:
+   - Both classes serve the same high-level purpose: retrieving context to build a prompt. The `ContextRetriever` interface abstracts this intent, allowing `DynamicPromptService` to treat them interchangeably in a polymorphic way.
+   - This aligns with the Liskov Substitution Principle (LSP): if `DynamicPromptService` expects a `ContextRetriever`, either implementation should work without breaking the contract (assuming the interface is well-designed).
+
+2. **Simplified Dependency Injection**:
+   - By sharing `ContextRetriever`, Spring can inject both beans using the interface type, and `DynamicPromptService` can maintain a clean constructor signature:
+     ```java
+     public DynamicPromptService(ContextRetriever vectorStoreContextRetriever, ContextRetriever staticContextRetriever, ...)
+     ```
+
+3. **Future Extensibility**:
+   - If you add more context retrieval strategies (e.g., a file-based retriever), they can also implement `ContextRetriever`, keeping the design consistent.
+
+### Arguments Against Sharing the Same Interface
+
+1. **Different Semantics and Inputs**:
+   - `VectorStoreContextRetriever` uses a `query` (and optionally `filterExpression` and `VectorStore`) for similarity search, which is dynamic and content-driven.
+   - `StaticContextRetriever` uses a `flowIdentifier` for a static, key-based lookup, which is fundamentally different in intent and behavior.
+   - The current interface forces `StaticContextRetriever` to accept a `query` parameter it doesn’t use, violating the Interface Segregation Principle (ISP)—clients shouldn’t be forced to depend on methods they don’t need.
+
+2. **Behavioral Mismatch**:
+   - Vector store retrieval involves complex vector similarity logic, while static retrieval is a simple database query. Sharing the same method signature (`retrieveContext(String)`) obscures these differences, potentially leading to confusion or misuse.
+   - For example, `VectorStoreContextRetriever` returns `null` to trigger fallback, but `StaticContextRetriever` returns a default message, which might not align perfectly in all use cases.
+
+3. **DynamicPromptService Usage**:
+   - In `DynamicPromptService`, you call:
+     - `vectorStoreContextRetriever.retrieveContext(query, filterExpression, selectedVectorStore)`
+     - `staticContextRetriever.retrieveContext(flowIdentifier)`
+   - The different parameter usage suggests they don’t naturally fit the same contract without awkward workarounds (e.g., overriding the base method to throw an exception in `VectorStoreContextRetriever`).
+
+---
+
+## Evaluation
+
+In the current implementation, having `StaticContextRetriever` and `VectorStoreContextRetriever` implement the same `ContextRetriever` interface is **partially sensible** but introduces some design friction:
+
+- **Pros**: It simplifies dependency injection and provides a unified abstraction for context retrieval, which aligns with the fallback logic in `DynamicPromptService`.
+- **Cons**: The semantic mismatch (query vs. flowIdentifier) and differing behaviors (dynamic search vs. static lookup) stretch the interface’s purpose, potentially violating ISP and making the contract less intuitive.
+
+Given your requirement to dynamically switch vector stores and maintain flexibility for teams, the interface design should ideally reflect the distinct roles while still supporting polymorphism where it makes sense.
+
+---
+
+## Proposed Refinement
+
+To address this, I suggest refining the design by either:
+
+### Option 1: Separate Interfaces with a Common Supertype
+
+- Define a broader `ContextProvider` interface as a supertype.
+- Create specific sub-interfaces for each retriever type.
+
+#### Updated Code
+
+```java
+// Common supertype
+package com.example.service;
+
+public interface ContextProvider {
+    String getContext();
+}
+
+// Vector store specific interface
+package com.example.service;
+
+import org.springframework.ai.vectorstore.VectorStore;
+
+public interface VectorContextRetriever extends ContextProvider {
+    String retrieveContext(String query, String filterExpression, VectorStore vectorStore);
+    @Override
+    default String getContext() {
+        throw new UnsupportedOperationException("Use retrieveContext with parameters");
+    }
+}
+
+// Static context specific interface
+package com.example.service;
+
+public interface StaticContextRetriever extends ContextProvider {
+    String retrieveContext(String flowIdentifier);
+    @Override
+    default String getContext() {
+        throw new UnsupportedOperationException("Use retrieveContext with flowIdentifier");
+    }
+}
+```
+
+#### Updated `VectorStoreContextRetriever`
+```java
+package com.example.service;
+
+import org.springframework.ai.document.Document;
+import org.springframework.ai.vectorstore.SearchRequest;
+import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
+import java.util.List;
+import java.util.stream.Collectors;
+
+@Service
+public class VectorStoreContextRetriever implements VectorContextRetriever {
+
+    private final float similarityThreshold;
+    private final int topK;
+    private final boolean includeMetadata;
+
+    public VectorStoreContextRetriever(
+            @Value("${vectorstore.similarityThreshold:0.7}") float similarityThreshold,
+            @Value("${vectorstore.topK:5}") int topK,
+            @Value("${vectorstore.includeMetadata:false}") boolean includeMetadata) {
+        this.similarityThreshold = similarityThreshold;
+        this.topK = topK;
+        this.includeMetadata = includeMetadata;
+    }
+
+    @Override
+    public String retrieveContext(String query, String filterExpression, VectorStore vectorStore) {
+        SearchRequest request = SearchRequest.query(query)
+                .withTopK(topK)
+                .withSimilarityThreshold(similarityThreshold);
+
+        if (filterExpression != null && !filterExpression.isEmpty()) {
+            FilterExpressionBuilder builder = new FilterExpressionBuilder();
+            request.withFilterExpression(builder.build(filterExpression));
+        }
+
+        List<Document> documents = vectorStore.similaritySearch(request);
+        if (documents.isEmpty()) {
+            return null;
+        }
+
+        return documents.stream()
+                .map(doc -> {
+                    String content = doc.getFormattedContent() != null ? doc.getFormattedContent() : doc.getContent();
+                    if (includeMetadata) {
+                        return content + "\n[Metadata: " + doc.getMetadata().toString() + "]";
+                    }
+                    return content;
+                })
+                .collect(Collectors.joining("\n"));
+    }
+}
+```
+
+#### Updated `StaticContextRetriever`
+```java
+package com.example.service;
+
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.stereotype.Service;
+
+@Service
+public class StaticContextRetrieverImpl implements StaticContextRetriever {
+
+    private final MongoTemplate mongoTemplate;
+
+    public StaticContextRetrieverImpl(MongoTemplate mongoTemplate) {
+        this.mongoTemplate = mongoTemplate;
+    }
+
+    @Override
+    public String retrieveContext(String flowIdentifier) {
+        Query query = new Query(Criteria.where("flowIdentifier").is(flowIdentifier));
+        StaticContextDoc doc = mongoTemplate.findOne(query, StaticContextDoc.class, "static_context");
+        return doc != null ? doc.getContent() : "No static context found for flowIdentifier: " + flowIdentifier;
+    }
+
+    public static class StaticContextDoc {
+        private String flowIdentifier;
+        private String content;
+
+        public String getFlowIdentifier() {
+            return flowIdentifier;
+        }
+
+        public void setFlowIdentifier(String flowIdentifier) {
+            this.flowIdentifier = flowIdentifier;
+        }
+
+        public String getContent() {
+            return content;
+        }
+
+        public void setContent(String content) {
+            this.content = content;
+        }
+    }
+}
+```
+
+#### Updated `DynamicPromptService`
+```java
+package com.example.service;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.stereotype.Service;
+
+import java.util.HashMap;
+import java.util.Map;
+
+@Service
+public class DynamicPromptService {
+
+    private final VectorContextRetriever vectorStoreContextRetriever;
+    private final StaticContextRetriever staticContextRetriever;
+    private final TemplatePromptBuilder promptBuilder;
+    private final Map<String, VectorStore> vectorStores;
+    private final VectorStore defaultVectorStore;
+
+    @Autowired
+    public DynamicPromptService(
+            VectorContextRetriever vectorStoreContextRetriever,
+            StaticContextRetriever staticContextRetriever,
+            TemplatePromptBuilder promptBuilder,
+            Map<String, VectorStore> vectorStores,
+            @Qualifier("defaultVectorStore") VectorStore defaultVectorStore) {
+        this.vectorStoreContextRetriever = vectorStoreContextRetriever;
+        this.staticContextRetriever = staticContextRetriever;
+        this.promptBuilder = promptBuilder;
+        this.vectorStores = vectorStores;
+        this.defaultVectorStore = defaultVectorStore;
+    }
+
+    public String buildPrompt(String query, String flowIdentifier, String filterExpression, String templateName, String vectorStoreName) {
+        VectorStore selectedVectorStore = vectorStoreName != null && vectorStores.containsKey(vectorStoreName)
+                ? vectorStores.get(vectorStoreName)
+                : defaultVectorStore;
+
+        String context = vectorStoreContextRetriever.retrieveContext(query, filterExpression, selectedVectorStore);
+        if (context == null) {
+            context = staticContextRetriever.retrieveContext(flowIdentifier);
+        }
+
+        Map<String, Object> params = new HashMap<>();
+        params.put("question", query);
+        params.put("context", context);
+
+        if (templateName != null && !templateName.isEmpty()) {
+            return promptBuilder.buildPromptWithTemplate(templateName, params);
+        }
+        return promptBuilder.buildPrompt(params);
+    }
+}
+```
+
+**Benefits**:
+- Clear separation of concerns: `VectorContextRetriever` for vector-based retrieval, `StaticContextRetriever` for static lookup.
+- `ContextProvider` allows polymorphism if needed, but specific interfaces enforce correct usage.
+- No forced parameter mismatches.
+
+---
+
+### Option 2: Keep Single Interface with Flexible Signature
+
+Modify `ContextRetriever` to use a more flexible signature, like a parameter map:
+
+```java
+package com.example.service;
+
+import java.util.Map;
+
+public interface ContextRetriever {
+    String retrieveContext(Map<String, Object> parameters);
+}
+```
+
+#### Updated `VectorStoreContextRetriever`
+```java
+package com.example.service;
+
+import org.springframework.ai.document.Document;
+import org.springframework.ai.vectorstore.SearchRequest;
+import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+@Service
+public class VectorStoreContextRetriever implements ContextRetriever {
+
+    private final float similarityThreshold;
+    private final int topK;
+    private final boolean includeMetadata;
+
+    public VectorStoreContextRetriever(
+            @Value("${vectorstore.similarityThreshold:0.7}") float similarityThreshold,
+            @Value("${vectorstore.topK:5}") int topK,
+            @Value("${vectorstore.includeMetadata:false}") boolean includeMetadata) {
+        this.similarityThreshold = similarityThreshold;
+        this.topK = topK;
+        this.includeMetadata = includeMetadata;
+    }
+
+    @Override
+    public String retrieveContext(Map<String, Object> parameters) {
+        String query = (String) parameters.get("query");
+        String filterExpression = (String) parameters.get("filterExpression");
+        VectorStore vectorStore = (VectorStore) parameters.get("vectorStore");
+
+        if (query == null || vectorStore == null) {
+            throw new IllegalArgumentException("query and vectorStore are required for VectorStoreContextRetriever");
+        }
+
+        SearchRequest request = SearchRequest.query(query)
+                .withTopK(topK)
+                .withSimilarityThreshold(similarityThreshold);
+
+        if (filterExpression != null && !filterExpression.isEmpty()) {
+            FilterExpressionBuilder builder = new FilterExpressionBuilder();
+            request.withFilterExpression(builder.build(filterExpression));
+        }
+
+        List<Document> documents = vectorStore.similaritySearch(request);
+        if (documents.isEmpty()) {
+            return null;
+        }
+
+        return documents.stream()
+                .map(doc -> {
+                    String content = doc.getFormattedContent() != null ? doc.getFormattedContent() : doc.getContent();
+                    if (includeMetadata) {
+                        return content + "\n[Metadata: " + doc.getMetadata().toString() + "]";
+                    }
+                    return content;
+                })
+                .collect(Collectors.joining("\n"));
+    }
+}
+```
+
+#### Updated `StaticContextRetriever`
+```java
+package com.example.service;
+
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.stereotype.Service;
+
+import java.util.Map;
+
+@Service
+public class StaticContextRetriever implements ContextRetriever {
+
+    private final MongoTemplate mongoTemplate;
+
+    public StaticContextRetriever(MongoTemplate mongoTemplate) {
+        this.mongoTemplate = mongoTemplate;
+    }
+
+    @Override
+    public String retrieveContext(Map<String, Object> parameters) {
+        String flowIdentifier = (String) parameters.get("flowIdentifier");
+        if (flowIdentifier == null) {
+            throw new IllegalArgumentException("flowIdentifier is required for StaticContextRetriever");
+        }
+
+        Query query = new Query(Criteria.where("flowIdentifier").is(flowIdentifier));
+        StaticContextDoc doc = mongoTemplate.findOne(query, StaticContextDoc.class, "static_context");
+        return doc != null ? doc.getContent() : "No static context found for flowIdentifier: " + flowIdentifier;
+    }
+
+    public static class StaticContextDoc {
+        private String flowIdentifier;
+        private String content;
+
+        public String getFlowIdentifier() {
+            return flowIdentifier;
+        }
+
+        public void setFlowIdentifier(String flowIdentifier) {
+            this.flowIdentifier = flowIdentifier;
+        }
+
+        public String getContent() {
+            return content;
+        }
+
+        public void setContent(String content) {
+            this.content = content;
+        }
+    }
+}
+```
+
+#### Updated `DynamicPromptService`
+```java
+package com.example.service;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.stereotype.Service;
+
+import java.util.HashMap;
+import java.util.Map;
+
+@Service
+public class DynamicPromptService {
+
+    private final VectorStoreContextRetriever vectorStoreContextRetriever;
+    private final StaticContextRetriever staticContextRetriever;
+    private final TemplatePromptBuilder promptBuilder;
+    private final Map<String, VectorStore> vectorStores;
+    private final VectorStore defaultVectorStore;
+
+    @Autowired
+    public DynamicPromptService(
+            VectorStoreContextRetriever vectorStoreContextRetriever,
+            StaticContextRetriever staticContextRetriever,
+            TemplatePromptBuilder promptBuilder,
+            Map<String, VectorStore> vectorStores,
+            @Qualifier("defaultVectorStore") VectorStore defaultVectorStore) {
+        this.vectorStoreContextRetriever = vectorStoreContextRetriever;
+        this.staticContextRetriever = staticContextRetriever;
+        this.promptBuilder = promptBuilder;
+        this.vectorStores = vectorStores;
+        this.defaultVectorStore = defaultVectorStore;
+    }
+
+    public String buildPrompt(String query, String flowIdentifier, String filterExpression, String templateName, String vectorStoreName) {
+        VectorStore selectedVectorStore = vectorStoreName != null && vectorStores.containsKey(vectorStoreName)
+                ? vectorStores.get(vectorStoreName)
+                : defaultVectorStore;
+
+        Map<String, Object> vectorParams = new HashMap<>();
+        vectorParams.put("query", query);
+        vectorParams.put("filterExpression", filterExpression);
+        vectorParams.put("vectorStore", selectedVectorStore);
+
+        String context = vectorStoreContextRetriever.retrieveContext(vectorParams);
+        if (context == null) {
+            Map<String, Object> staticParams = new HashMap<>();
+            staticParams.put("flowIdentifier", flowIdentifier);
+            context = staticContextRetriever.retrieveContext(staticParams);
+        }
+
+        Map<String, Object> promptParams = new HashMap<>();
+        promptParams.put("question", query);
+        promptParams.put("context", context);
+
+        if (templateName != null && !templateName.isEmpty()) {
+            return promptBuilder.buildPromptWithTemplate(templateName, promptParams);
+        }
+        return promptBuilder.buildPrompt(promptParams);
+    }
+}
+```
+
+**Benefits**:
+- Single interface with a flexible signature accommodates both use cases.
+- Explicit parameter requirements reduce confusion.
+
+**Drawbacks**:
+- Less type safety due to `Map` usage; requires runtime checks.
+- Less intuitive than specific interfaces.
+
+---
+
+## Recommendation
+
+**Option 1 (Separate Interfaces with Supertype)** is the better choice for your use case:
+- It respects the distinct semantics of vector-based vs. static retrieval.
+- It maintains type safety and clarity in `DynamicPromptService`.
+- It supports your dynamic `VectorStore` requirement without compromising the design.
+- The `ContextProvider` supertype preserves polymorphism if needed later.
+
+The current shared `ContextRetriever` interface works but forces awkward compromises (e.g., unused parameters, overridden methods). Refining it as shown in Option 1 aligns better with SOLID principles and makes the code more maintainable, especially as you scale to support more teams or retrieval strategies.
+
+---
+
+## Final Answer
+
+Yes, it makes sense for `StaticContextRetriever` and `VectorStoreContextRetriever` to share a high-level abstraction, but the current `ContextRetriever` interface isn’t ideal due to their differing inputs and behaviors. I recommend adopting **Option 1** (separate interfaces with a `ContextProvider` supertype) to improve clarity and flexibility while keeping the dynamic `VectorStore` switching intact. The updated code above implements this fully.
+
+Let me know if you’d like to proceed with this refinement or explore a different approach!
