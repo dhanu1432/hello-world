@@ -1,0 +1,553 @@
+Your request to introduce a `KnowledgeStore` interface mirroring the `VectorStore` approach is an excellent way to abstract static knowledge retrieval from MongoDB collections, providing symmetry with vector-based retrieval and enabling dynamic, team-specific context sources. This design will allow each team or use case to define their own `VectorStore` and `KnowledgeStore` instances (backed by different MongoDB collections) with minimal code changes, while hiding implementation details from flow and prompt developers. It also supports flexible input (e.g., `flowIdentifier` like "not_able_to_call" or raw text like "I can’t make phone calls") and dynamic prompt building with any combination of stores and templates.
+
+Here’s how we’ll achieve this:
+
+### Design Goals
+
+1. **Symmetry**: Define a `KnowledgeStore` interface parallel to `VectorStore` for static knowledge retrieval from MongoDB.
+2. **Dynamic Selection**: Allow runtime selection of `VectorStore` and `KnowledgeStore` instances via names (e.g., `vectorStoreName`, `knowledgeStoreName`).
+3. **Flexibility**: Support both `flowIdentifier` and raw text inputs, abstracting the retrieval logic.
+4. **Encapsulation**: Hide implementation details (e.g., MongoDB queries, vector search) from flow developers.
+5. **Extensibility**: Enable teams to add new stores by configuring beans without modifying core logic.
+
+---
+
+## Updated Solution
+
+### 1. New `KnowledgeStore` Interface
+
+```java
+package com.example.service;
+
+public interface KnowledgeStore {
+    String retrieveContext(String input);
+}
+```
+
+- **Purpose**: Abstracts static knowledge retrieval from MongoDB collections.
+- **Input**: Takes a generic `String` input, which can be a `flowIdentifier` (e.g., "not_able_to_call") or raw text (e.g., "I can’t make phone calls"), leaving interpretation to the implementation.
+
+---
+
+### 2. Implementation: `MongoKnowledgeStore`
+
+```java
+package com.example.service;
+
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
+
+public class MongoKnowledgeStore implements KnowledgeStore {
+
+    private final MongoTemplate mongoTemplate;
+    private final String collectionName;
+
+    public MongoKnowledgeStore(MongoTemplate mongoTemplate, String collectionName) {
+        this.mongoTemplate = mongoTemplate;
+        this.collectionName = collectionName;
+    }
+
+    @Override
+    public String retrieveContext(String input) {
+        Query query = new Query(Criteria.where("flowIdentifier").is(input));
+        KnowledgeDoc doc = mongoTemplate.findOne(query, KnowledgeDoc.class, collectionName);
+        if (doc == null) {
+            // Fallback: treat input as raw text and search content field (optional)
+            query = new Query(Criteria.where("content").regex(input, "i")); // Case-insensitive search
+            doc = mongoTemplate.findOne(query, KnowledgeDoc.class, collectionName);
+        }
+        return doc != null ? doc.getContent() : "No context found for input: " + input;
+    }
+
+    public static class KnowledgeDoc {
+        private String flowIdentifier;
+        private String content;
+
+        public String getFlowIdentifier() {
+            return flowIdentifier;
+        }
+
+        public void setFlowIdentifier(String flowIdentifier) {
+            this.flowIdentifier = flowIdentifier;
+        }
+
+        public String getContent() {
+            return content;
+        }
+
+        public void setContent(String content) {
+            this.content = content;
+        }
+    }
+}
+```
+
+**Notes**:
+- Searches by `flowIdentifier` first; if not found, falls back to a content search using regex (configurable behavior).
+- Each instance is tied to a specific `collectionName`, allowing team-specific knowledge stores.
+
+---
+
+### 3. Updated Configuration (`VectorStoreConfig`)
+
+Now includes `KnowledgeStore` beans alongside `VectorStore` beans:
+
+```java
+package com.example.config;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.ai.embedding.EmbeddingModel;
+import org.springframework.ai.openai.OpenAiEmbeddingModel;
+import org.springframework.ai.openai.api.OpenAiApi;
+import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.ai.vectorstore.mongodb.MongoDBAtlasVectorStore;
+
+import com.example.service.KnowledgeStore;
+import com.example.service.MongoKnowledgeStore;
+
+@Configuration
+public class VectorStoreConfig {
+
+    @Bean
+    public EmbeddingModel embeddingModel() {
+        return new OpenAiEmbeddingModel(new OpenAiApi("your-openai-api-key"));
+    }
+
+    // Vector Stores
+    @Bean(name = "defaultVectorStore")
+    public VectorStore defaultVectorStore(MongoTemplate mongoTemplate, EmbeddingModel embeddingModel) {
+        return MongoDBAtlasVectorStore.builder()
+                .withMongoTemplate(mongoTemplate)
+                .withEmbeddingModel(embeddingModel)
+                .withCollectionName("default_vector_collection")
+                .build();
+    }
+
+    @Bean(name = "teamAVectorStore")
+    public VectorStore teamAVectorStore(MongoTemplate mongoTemplate, EmbeddingModel embeddingModel) {
+        return MongoDBAtlasVectorStore.builder()
+                .withMongoTemplate(mongoTemplate)
+                .withEmbeddingModel(embeddingModel)
+                .withCollectionName("vector_collection_team_a")
+                .build();
+    }
+
+    @Bean(name = "teamBVectorStore")
+    public VectorStore teamBVectorStore(MongoTemplate mongoTemplate, EmbeddingModel embeddingModel) {
+        return MongoDBAtlasVectorStore.builder()
+                .withMongoTemplate(mongoTemplate)
+                .withEmbeddingModel(embeddingModel)
+                .withCollectionName("vector_collection_team_b")
+                .build();
+    }
+
+    // Knowledge Stores
+    @Bean(name = "defaultKnowledgeStore")
+    public KnowledgeStore defaultKnowledgeStore(MongoTemplate mongoTemplate) {
+        return new MongoKnowledgeStore(mongoTemplate, "default_knowledge_collection");
+    }
+
+    @Bean(name = "teamAKnowledgeStore")
+    public KnowledgeStore teamAKnowledgeStore(MongoTemplate mongoTemplate) {
+        return new MongoKnowledgeStore(mongoTemplate, "knowledge_collection_team_a");
+    }
+
+    @Bean(name = "teamBKnowledgeStore")
+    public KnowledgeStore teamBKnowledgeStore(MongoTemplate mongoTemplate) {
+        return new MongoKnowledgeStore(mongoTemplate, "knowledge_collection_team_b");
+    }
+}
+```
+
+**Notes**:
+- Defined parallel `VectorStore` and `KnowledgeStore` beans with team-specific collection names.
+- New stores can be added by adding `@Bean` methods without changing other code.
+
+---
+
+### 4. Updated `VectorStoreContextRetriever`
+
+Renamed to `VectorContextRetriever` for consistency, unchanged logic:
+
+```java
+package com.example.service;
+
+import org.springframework.ai.document.Document;
+import org.springframework.ai.vectorstore.SearchRequest;
+import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
+import java.util.List;
+import java.util.stream.Collectors;
+
+@Service
+public class VectorContextRetriever {
+
+    private final float similarityThreshold;
+    private final int topK;
+    private final boolean includeMetadata;
+
+    public VectorContextRetriever(
+            @Value("${vectorstore.similarityThreshold:0.7}") float similarityThreshold,
+            @Value("${vectorstore.topK:5}") int topK,
+            @Value("${vectorstore.includeMetadata:false}") boolean includeMetadata) {
+        this.similarityThreshold = similarityThreshold;
+        this.topK = topK;
+        this.includeMetadata = includeMetadata;
+    }
+
+    public String retrieveContext(String query, String filterExpression, VectorStore vectorStore) {
+        SearchRequest request = SearchRequest.query(query)
+                .withTopK(topK)
+                .withSimilarityThreshold(similarityThreshold);
+
+        if (filterExpression != null && !filterExpression.isEmpty()) {
+            FilterExpressionBuilder builder = new FilterExpressionBuilder();
+            request.withFilterExpression(builder.build(filterExpression));
+        }
+
+        List<Document> documents = vectorStore.similaritySearch(request);
+        if (documents.isEmpty()) {
+            return null;
+        }
+
+        return documents.stream()
+                .map(doc -> {
+                    String content = doc.getFormattedContent() != null ? doc.getFormattedContent() : doc.getContent();
+                    if (includeMetadata) {
+                        return content + "\n[Metadata: " + doc.getMetadata().toString() + "]";
+                    }
+                    return content;
+                })
+                .collect(Collectors.joining("\n"));
+    }
+}
+```
+
+---
+
+### 5. Updated `DynamicPromptService`
+
+Now supports dynamic selection of both `VectorStore` and `KnowledgeStore`:
+
+```java
+package com.example.service;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.stereotype.Service;
+
+import java.util.HashMap;
+import java.util.Map;
+
+@Service
+public class DynamicPromptService {
+
+    private final VectorContextRetriever vectorContextRetriever;
+    private final PromptTemplateService promptTemplateService;
+    private final TemplatePromptBuilder promptBuilder;
+    private final Map<String, VectorStore> vectorStores;
+    private final Map<String, KnowledgeStore> knowledgeStores;
+    private final VectorStore defaultVectorStore;
+    private final KnowledgeStore defaultKnowledgeStore;
+
+    @Autowired
+    public DynamicPromptService(
+            VectorContextRetriever vectorContextRetriever,
+            PromptTemplateService promptTemplateService,
+            TemplatePromptBuilder promptBuilder,
+            Map<String, VectorStore> vectorStores,
+            Map<String, KnowledgeStore> knowledgeStores,
+            @Qualifier("defaultVectorStore") VectorStore defaultVectorStore,
+            @Qualifier("defaultKnowledgeStore") KnowledgeStore defaultKnowledgeStore) {
+        this.vectorContextRetriever = vectorContextRetriever;
+        this.promptTemplateService = promptTemplateService;
+        this.promptBuilder = promptBuilder;
+        this.vectorStores = vectorStores;
+        this.knowledgeStores = knowledgeStores;
+        this.defaultVectorStore = defaultVectorStore;
+        this.defaultKnowledgeStore = defaultKnowledgeStore;
+    }
+
+    public String buildPrompt(String input, String filterExpression, String templateName, String vectorStoreName, String knowledgeStoreName) {
+        String context = null;
+
+        // Try VectorStore if specified
+        if (vectorStoreName != null) {
+            VectorStore selectedVectorStore = vectorStores.getOrDefault(vectorStoreName, defaultVectorStore);
+            context = vectorContextRetriever.retrieveContext(input, filterExpression, selectedVectorStore);
+        }
+
+        // Fallback to KnowledgeStore if VectorStore fails or not specified
+        if (context == null && knowledgeStoreName != null) {
+            KnowledgeStore selectedKnowledgeStore = knowledgeStores.getOrDefault(knowledgeStoreName, defaultKnowledgeStore);
+            context = selectedKnowledgeStore.retrieveContext(input);
+        }
+
+        // If both fail and no specific store is requested, try defaults
+        if (context == null && vectorStoreName == null && knowledgeStoreName == null) {
+            context = vectorContextRetriever.retrieveContext(input, filterExpression, defaultVectorStore);
+            if (context == null) {
+                context = defaultKnowledgeStore.retrieveContext(input);
+            }
+        }
+
+        Map<String, Object> params = new HashMap<>();
+        params.put("question", input);
+        params.put("context", context != null ? context : "No context available");
+
+        if (templateName != null && !templateName.isEmpty()) {
+            return promptBuilder.buildPromptWithTemplate(templateName, params);
+        }
+        return promptBuilder.buildPrompt(params);
+    }
+}
+```
+
+**Changes**:
+- Removed direct dependency on `StaticContextRetriever`.
+- Injected `Map<String, KnowledgeStore>` for all knowledge stores.
+- Added `knowledgeStoreName` parameter to select a `KnowledgeStore`.
+- Logic prioritizes `VectorStore` if specified, falls back to `KnowledgeStore`, and uses defaults if neither is provided.
+
+---
+
+### 6. Updated `PromptTemplateService` and `TemplatePromptBuilder`
+
+Unchanged from previous versions:
+
+#### `PromptTemplateService`
+```java
+package com.example.service;
+
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.stereotype.Service;
+
+@Service
+public class PromptTemplateService {
+
+    private final MongoTemplate mongoTemplate;
+
+    public PromptTemplateService(MongoTemplate mongoTemplate) {
+        this.mongoTemplate = mongoTemplate;
+    }
+
+    public String getTemplateByName(String templateName) {
+        Query query = new Query(Criteria.where("template_name").is(templateName));
+        PromptTemplateDoc doc = mongoTemplate.findOne(query, PromptTemplateDoc.class, "prompt_templates");
+        if (doc == null || doc.getTemplateText() == null) {
+            throw new IllegalArgumentException("No template found for template_name: " + templateName);
+        }
+        return doc.getTemplateText();
+    }
+
+    public static class PromptTemplateDoc {
+        private String templateName;
+        private String templateText;
+
+        public String getTemplateName() {
+            return templateName;
+        }
+
+        public void setTemplateName(String templateName) {
+            this.templateName = templateName;
+        }
+
+        public String getTemplateText() {
+            return templateText;
+        }
+
+        public void setTemplateText(String templateText) {
+            this.templateText = templateText;
+        }
+    }
+}
+```
+
+#### `TemplatePromptBuilder`
+```java
+package com.example.service;
+
+import org.springframework.ai.prompt.PromptTemplate;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
+import java.util.Map;
+
+@Service
+public class TemplatePromptBuilder implements PromptBuilder {
+
+    private final PromptTemplateService templateService;
+    private final String defaultTemplateName;
+
+    public TemplatePromptBuilder(PromptTemplateService templateService,
+                                 @Value("${prompt.templateName:default}") String defaultTemplateName) {
+        this.templateService = templateService;
+        this.defaultTemplateName = defaultTemplateName;
+    }
+
+    @Override
+    public String buildPrompt(Map<String, Object> parameters) {
+        String templateText = templateService.getTemplateByName(defaultTemplateName);
+        PromptTemplate promptTemplate = new PromptTemplate(templateText);
+        return promptTemplate.render(parameters);
+    }
+
+    public String buildPromptWithTemplate(String templateName, Map<String, Object> parameters) {
+        String templateText = templateService.getTemplateByName(templateName);
+        PromptTemplate promptTemplate = new PromptTemplate(templateText);
+        return promptTemplate.render(parameters);
+    }
+}
+```
+
+---
+
+### 7. Updated Controller
+
+#### `PromptController`
+```java
+package com.example.controller;
+
+import com.example.service.DynamicPromptService;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class PromptController {
+
+    private final DynamicPromptService promptService;
+
+    public PromptController(DynamicPromptService promptService) {
+        this.promptService = promptService;
+    }
+
+    @GetMapping("/generate-prompt")
+    public String generatePrompt(
+            @RequestParam String input,
+            @RequestParam(required = false) String filterExpression,
+            @RequestParam(required = false) String templateName,
+            @RequestParam(required = false) String vectorStoreName,
+            @RequestParam(required = false) String knowledgeStoreName) {
+        return promptService.buildPrompt(input, filterExpression, templateName, vectorStoreName, knowledgeStoreName);
+    }
+}
+```
+
+---
+
+### 8. Application Properties (`application.properties`)
+
+Unchanged:
+```properties
+spring.data.mongodb.uri=mongodb+srv://<username>:<password>@<cluster>.mongodb.net/<database>?retryWrites=true&w=majority
+spring.data.mongodb.database=<database>
+prompt.templateName=default
+vectorstore.similarityThreshold=0.7
+vectorstore.topK=5
+vectorstore.includeMetadata=false
+spring.ai.openai.api-key=your-openai-api-key
+```
+
+---
+
+### 9. Main Application (Unchanged)
+
+#### `DynamicPromptApp`
+```java
+package com.example;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class DynamicPromptApp {
+    public static void main(String[] args) {
+        SpringApplication.run(DynamicPromptApp.class, args);
+    }
+}
+```
+
+---
+
+## MongoDB Setup
+
+- **Vector Collections** (e.g., `vector_collection_team_a`): Store vectorized documents for similarity search.
+- **Knowledge Collections** (e.g., `knowledge_collection_team_a`): Store static documents like:
+  ```json
+  {
+    "flowIdentifier": "not_able_to_call",
+    "content": "If you're unable to make phone calls, check your network settings or contact support."
+  }
+  {
+    "flowIdentifier": "general",
+    "content": "General troubleshooting: restart your device."
+  }
+  ```
+
+---
+
+## Usage Examples
+
+1. **Team A Vector Store**:
+   ```
+   curl "http://localhost:8080/generate-prompt?input=I can’t make phone calls&vectorStoreName=teamAVectorStore"
+   ```
+   - Uses `vector_collection_team_a`.
+
+2. **Team B Knowledge Store**:
+   ```
+   curl "http://localhost:8080/generate-prompt?input=not_able_to_call&knowledgeStoreName=teamBKnowledgeStore"
+   ```
+   - Uses `knowledge_collection_team_b`.
+
+3. **Default Stores with Raw Text**:
+   ```
+   curl "http://localhost:8080/generate-prompt?input=I can’t make phone calls"
+   ```
+   - Tries `default_vector_collection`, falls back to `default_knowledge_collection`.
+
+4. **Custom Template with Team A**:
+   ```
+   curl "http://localhost:8080/generate-prompt?input=not_able_to_call&vectorStoreName=teamAVectorStore&templateName=detailed"
+   ```
+
+---
+
+## How It Meets Your Requirements
+
+1. **Dynamic Stores**:
+   - `VectorStore` and `KnowledgeStore` instances are selectable via `vectorStoreName` and `knowledgeStoreName`.
+   - New stores are added by defining beans in `VectorStoreConfig` (e.g., `@Bean(name = "teamCKnowledgeStore")`).
+
+2. **Flexible Input**:
+   - `input` can be a `flowIdentifier` or raw text; `MongoKnowledgeStore` handles both.
+
+3. **Encapsulation**:
+   - Flow developers only need to specify `input`, `vectorStoreName`, `knowledgeStoreName`, and `templateName`. Implementation details (MongoDB queries, vector search) are hidden.
+
+4. **Extensibility**:
+   - Teams add new stores by configuring beans without touching `DynamicPromptService` or retriever logic.
+
+5. **Prompt Building**:
+   - Any combination of `VectorStore`, `KnowledgeStore`, and template is supported via the `buildPrompt` method.
+
+---
+
+## Verification Against Spring AI 1.0.0-M6
+
+- **New `KnowledgeStore`**:
+  - Pure custom interface, no Spring AI dependencies beyond `MongoTemplate`.
+- **Existing Components**:
+  - `VectorStore` usage remains compliant with 1.0.0-M6 (`MongoDBAtlasVectorStore.Builder`).
+
+This design provides a clean, extensible abstraction for both vector and static knowledge retrieval, aligning with your vision while keeping the system flexible and developer-friendly. Let me know if you’d like further refinements!
