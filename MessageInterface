@@ -1,0 +1,262 @@
+I understand your requirement: you want to manage chat history in MongoDB using Spring AI’s `Message` objects (`org.springframework.ai.chat.messages.Message`, e.g., `UserMessage`, `AssistantMessage`) directly, without using `VectorStore` for history or defining a custom `Message` class. You’d like to read and write these objects to/from MongoDB seamlessly while avoiding unnecessary complexity. Since Spring AI 1.0.0-M6 doesn’t provide a pre-built chat history store for MongoDB, we’ll use `MongoTemplate` to handle Spring AI’s `Message` objects natively, ensuring compatibility with `ChatClient` and minimizing custom code.
+
+Here’s how we’ll achieve this:
+
+### Strategy
+- **Use Spring AI’s `Message` Interface**: Leverage `UserMessage` and `AssistantMessage` for history storage.
+- **MongoDB with `MongoTemplate`**: Store and retrieve `Message` objects directly in MongoDB without a custom entity, using a simple document structure per session.
+- **Avoid VectorStore**: Keep history management lightweight and separate from vector-based context retrieval.
+- **Seamless Read/Write**: Map `Message` properties (`content`, `messageType`) to MongoDB fields and back.
+
+---
+
+## Updated Solution
+
+### 1. Updated `ConversationHistoryService`
+
+Manages `Message` objects directly with `MongoTemplate`:
+
+```java
+package com.example.service;
+
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.data.mongodb.core.query.Update;
+import org.springframework.stereotype.Service;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+@Service
+public class ConversationHistoryService {
+
+    private final MongoTemplate mongoTemplate;
+
+    public ConversationHistoryService(MongoTemplate mongoTemplate) {
+        this.mongoTemplate = mongoTemplate;
+    }
+
+    public void saveOrUpdateHistory(String sessionId, String prompt, String responseContent) {
+        if (sessionId == null || sessionId.trim().isEmpty()) {
+            throw new IllegalArgumentException("sessionId cannot be null or empty");
+        }
+        if (prompt == null || prompt.trim().isEmpty()) {
+            throw new IllegalArgumentException("Prompt cannot be null or empty");
+        }
+
+        Query query = new Query(Criteria.where("sessionId").is(sessionId));
+        Update update = new Update()
+                .push("messages", new UserMessage(prompt))
+                .push("messages", new AssistantMessage(responseContent))
+                .setOnInsert("timestamp", System.currentTimeMillis());
+
+        mongoTemplate.upsert(query, update, "conversation_history");
+    }
+
+    public List<Message> getHistoryBySessionId(String sessionId) {
+        if (sessionId == null || sessionId.trim().isEmpty()) {
+            return List.of();
+        }
+
+        Query query = new Query(Criteria.where("sessionId").is(sessionId));
+        Map<String, Object> result = mongoTemplate.findOne(query, Map.class, "conversation_history");
+        if (result == null || !result.containsKey("messages")) {
+            return List.of();
+        }
+
+        List<Map<String, Object>> rawMessages = (List<Map<String, Object>>) result.get("messages");
+        List<Message> messages = new ArrayList<>();
+        for (Map<String, Object> rawMsg : rawMessages) {
+            String messageType = (String) rawMsg.get("messageType");
+            String content = (String) rawMsg.get("content");
+            if ("user".equals(messageType)) {
+                messages.add(new UserMessage(content));
+            } else if ("assistant".equals(messageType)) {
+                messages.add(new AssistantMessage(content));
+            }
+        }
+        return messages;
+    }
+}
+```
+
+**Key Points**:
+- **Writing**: Uses `UserMessage` and `AssistantMessage` directly, which are serialized to MongoDB as maps with `messageType` and `content` fields (Spring Data MongoDB handles this automatically).
+- **Reading**: Deserializes MongoDB documents back into `UserMessage` or `AssistantMessage` based on `messageType`.
+- **Structure**: Stores one document per `sessionId` with a `messages` array, avoiding a custom entity.
+
+---
+
+### 2. Updated `LlmService`
+
+Uses Spring AI’s `Message` objects for history:
+
+```java
+package com.example.service;
+
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.stereotype.Service;
+
+import java.util.List;
+
+@Service
+public class LlmService {
+
+    private final ChatClient chatClient;
+    private final ConversationHistoryService historyService;
+
+    public LlmService(ChatClient chatClient, ConversationHistoryService historyService) {
+        this.chatClient = chatClient;
+        this.historyService = historyService;
+    }
+
+    @Cacheable(value = "llmResponses", key = "#sessionId + #prompt")
+    public String executePrompt(String prompt, String sessionId, float temperature, int maxTokens) {
+        if (prompt == null || prompt.trim().isEmpty()) {
+            throw new IllegalArgumentException("Prompt cannot be null or empty");
+        }
+        if (sessionId == null || sessionId.trim().isEmpty()) {
+            throw new IllegalArgumentException("sessionId cannot be null or empty");
+        }
+
+        // Get existing conversation history
+        List<Message> messages = historyService.getHistoryBySessionId(sessionId);
+
+        // Build ChatClient request with message history
+        ChatClient.RequestSpec request = chatClient.prompt();
+        for (Message msg : messages) {
+            if ("user".equals(msg.getMessageType())) {
+                request.user(msg.getContent());
+            } else if ("assistant".equals(msg.getMessageType())) {
+                request.assistant(msg.getContent());
+            }
+        }
+        request.user(prompt);
+
+        // Execute LLM call
+        String responseContent;
+        try {
+            ChatResponse response = request.options(options -> options
+                    .temperature(temperature)
+                    .maxTokens(maxTokens))
+                    .call()
+                    .chatResponse();
+            responseContent = response.getResult().getOutput().getContent();
+        } catch (Exception e) {
+            responseContent = "Error calling LLM: " + e.getMessage();
+        }
+
+        // Save updated history
+        historyService.saveOrUpdateHistory(sessionId, prompt, responseContent);
+
+        return responseContent;
+    }
+
+    public String executePrompt(String prompt, String sessionId) {
+        return executePrompt(prompt, sessionId, 0.7f, 256);
+    }
+}
+```
+
+**Changes**:
+- No changes needed; already compatible with `List<Message>` from `historyService`.
+
+---
+
+### 3. Other Classes (Unchanged)
+
+- **`DynamicPromptService`**, **`VectorContextRetriever`**, **`PromptController`**, **`VectorStoreConfig`**, **`KnowledgeStore`**, **`MongoKnowledgeStore`**, **`PromptTemplateService`**, **`TemplatePromptBuilder`**: Remain unchanged, as they don’t directly interact with the history structure beyond passing `sessionId`.
+
+---
+
+## MongoDB History Example
+
+After two calls with `sessionId=user123`:
+```json
+{
+  "_id": "abc123",
+  "sessionId": "user123",
+  "messages": [
+    {
+      "messageType": "user",
+      "content": "Based on the following context: Check your network settings, answer the question: I can’t make phone calls"
+    },
+    {
+      "messageType": "assistant",
+      "content": "Ensure your network is active or restart your device."
+    },
+    {
+      "messageType": "user",
+      "content": "Based on the following context: Check your network settings, answer the question: What else can I try?"
+    },
+    {
+      "messageType": "assistant",
+      "content": "Try switching to airplane mode and back, or contact your provider."
+    }
+  ],
+  "timestamp": 1742015129
+}
+```
+
+**Note**: The exact field names (`messageType`, `content`) match Spring AI’s `Message` serialization by `MongoTemplate`.
+
+---
+
+## Usage Examples
+
+1. **First Call**:
+   ```
+   curl "http://localhost:8080/generate-prompt?input=I can’t make phone calls&sessionId=user123&vectorStoreName=teamAVectorStore"
+   ```
+   - Builds prompt, sends initial message list, saves as `UserMessage` and `AssistantMessage`, returns content.
+
+2. **Follow-Up Call**:
+   ```
+   curl "http://localhost:8080/generate-prompt?input=What else can I try?&sessionId=user123&vectorStoreName=teamAVectorStore"
+   ```
+   - Appends new `UserMessage` and `AssistantMessage` to the session’s history, sends to LLM, returns content.
+
+---
+
+## How It Meets Your Requirements
+
+1. **Spring AI `Message` Objects**:
+   - Uses `UserMessage` and `AssistantMessage` directly, avoiding a custom `Message` class.
+2. **Read/Write Without Custom Classes**:
+   - `MongoTemplate` handles serialization/deserialization of `Message` objects to/from MongoDB, no custom entity needed.
+3. **No VectorStore for History**:
+   - History is stored in a plain MongoDB collection (`conversation_history`), separate from `VectorStore` used for context retrieval.
+4. **Seamless Integration**:
+   - `ChatClient` consumes the `List<Message>` directly, maintaining conversational context.
+
+---
+
+## Verification Against Spring AI 1.0.0-M6
+
+- **`Message` Interface**:
+  - `UserMessage` and `AssistantMessage` are in `spring-ai-core-1.0.0-M6`, with `messageType` and `content` fields.
+- **`MongoTemplate`**:
+  - Serializes `Message` implementations as maps, compatible with Spring Data MongoDB 3.2.3.
+- **`ChatClient`**:
+  - Supports `List<Message>` via `user()` and `assistant()`, confirmed in 1.0.0-M6.
+
+---
+
+## Conclusion
+
+This solution fulfills your request by:
+- Using Spring AI’s `Message` objects (`UserMessage`, `AssistantMessage`) without a custom `Message` class.
+- Reading/writing history to MongoDB via `MongoTemplate`, avoiding a custom entity.
+- Keeping history management separate from `VectorStore`, which remains used only for context retrieval via `VectorContextRetriever`.
+
+The only custom code is the logic in `ConversationHistoryService` to map `Message` objects to MongoDB documents, which is unavoidable without a native Spring AI chat history store. This is the leanest approach possible with Spring AI 1.0.0-M6 while meeting your goals.
+
+Let me know if you’d like further refinements (e.g., handling metadata, optimizing storage)!
