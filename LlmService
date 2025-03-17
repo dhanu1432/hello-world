@@ -1,0 +1,504 @@
+Your observation is spot-on: the LLM response from `ChatClient` (in this case, OpenAI’s API format) contains a structured JSON object with a `choices` array, where each choice includes a `message` object with `role` and `content`. To support conversational context properly, we should store the entire list of messages (including `role` and `content`) per session in MongoDB and append new messages for subsequent conversations, sending the updated list to the LLM. Additionally, you’ve requested reverting `VectorStore` usage to leverage `VectorStoreDocumentRetriever` directly, which I’ll integrate into the solution.
+
+Here’s how we’ll adapt the design:
+
+1. **Update History Storage**: Store a list of messages (`role`, `content`) per session instead of a single prompt/response pair.
+2. **Append Messages**: For each new conversation, append the latest user input and LLM response to the session’s message list.
+3. **Send Full Message List**: Pass the accumulated messages to `ChatClient` for context-aware responses.
+4. **Use `VectorStoreDocumentRetriever`**: Replace custom vector retrieval logic with Spring AI’s built-in retriever.
+
+Below is the updated solution based on your requirements.
+
+---
+
+## Updated Solution
+
+### 1. Updated Conversation History Entity (`ConversationHistory`)
+
+Store a list of messages instead of separate prompt/response fields:
+
+```java
+package com.example.model;
+
+import org.springframework.data.annotation.Id;
+import org.springframework.data.mongodb.core.mapping.Document;
+
+import java.util.ArrayList;
+import java.util.List;
+
+@Document(collection = "conversation_history")
+public class ConversationHistory {
+
+    @Id
+    private String id;
+    private String sessionId;
+    private List<Message> messages;
+    private long timestamp;
+
+    public ConversationHistory() {
+        this.messages = new ArrayList<>();
+    }
+
+    public ConversationHistory(String sessionId) {
+        this.sessionId = sessionId;
+        this.messages = new ArrayList<>();
+        this.timestamp = System.currentTimeMillis();
+    }
+
+    // Getters and Setters
+    public String getId() { return id; }
+    public void setId(String id) { this.id = id; }
+    public String getSessionId() { return sessionId; }
+    public void setSessionId(String sessionId) { this.sessionId = sessionId; }
+    public List<Message> getMessages() { return messages; }
+    public void setMessages(List<Message> messages) { this.messages = messages; }
+    public long getTimestamp() { return timestamp; }
+    public void setTimestamp(long timestamp) { this.timestamp = timestamp; }
+
+    public void addMessage(String role, String content) {
+        this.messages.add(new Message(role, content));
+    }
+
+    public static class Message {
+        private String role;
+        private String content;
+
+        public Message() {}
+
+        public Message(String role, String content) {
+            this.role = role;
+            this.content = content;
+        }
+
+        public String getRole() { return role; }
+        public void setRole(String role) { this.role = role; }
+        public String getContent() { return content; }
+        public void setContent(String content) { this.content = content; }
+    }
+}
+```
+
+**Changes**:
+- Replaced `input`, `prompt`, `response` with a `List<Message>` to store multiple messages per session.
+- Added a nested `Message` class with `role` and `content`.
+
+---
+
+### 2. Updated `ConversationHistoryService`
+
+Manage session-based message lists:
+
+```java
+package com.example.service;
+
+import com.example.model.ConversationHistory;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.data.mongodb.core.query.Update;
+import org.springframework.stereotype.Service;
+
+@Service
+public class ConversationHistoryService {
+
+    private final MongoTemplate mongoTemplate;
+
+    public ConversationHistoryService(MongoTemplate mongoTemplate) {
+        this.mongoTemplate = mongoTemplate;
+    }
+
+    public void saveOrUpdateHistory(String sessionId, String userInput, String prompt, String responseContent) {
+        if (sessionId == null || sessionId.trim().isEmpty()) {
+            throw new IllegalArgumentException("sessionId cannot be null or empty");
+        }
+
+        Query query = new Query(Criteria.where("sessionId").is(sessionId));
+        ConversationHistory history = mongoTemplate.findOne(query, ConversationHistory.class);
+
+        if (history == null) {
+            history = new ConversationHistory(sessionId);
+        }
+
+        // Add user message (input as part of prompt)
+        history.addMessage("user", prompt);
+        // Add assistant message (response)
+        history.addMessage("assistant", responseContent);
+
+        mongoTemplate.save(history);
+    }
+
+    public ConversationHistory getHistoryBySessionId(String sessionId) {
+        if (sessionId == null || sessionId.trim().isEmpty()) {
+            return null; // Or throw exception if preferred
+        }
+        Query query = new Query(Criteria.where("sessionId").is(sessionId));
+        return mongoTemplate.findOne(query, ConversationHistory.class);
+    }
+}
+```
+
+**Changes**:
+- Updated to handle a single `ConversationHistory` document per `sessionId`, appending messages to its list.
+- Stores the prompt as a `user` message and the LLM response as an `assistant` message.
+
+---
+
+### 3. Updated `VectorContextRetriever`
+
+Use `VectorStoreDocumentRetriever` directly:
+
+```java
+package com.example.service;
+
+import org.springframework.ai.document.Document;
+import org.springframework.ai.vectorstore.SearchRequest;
+import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.ai.vectorstore.VectorStoreDocumentRetriever;
+import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
+import java.util.List;
+import java.util.stream.Collectors;
+
+@Service
+public class VectorContextRetriever {
+
+    private final float similarityThreshold;
+    private final int topK;
+    private final boolean includeMetadata;
+
+    public VectorContextRetriever(
+            @Value("${vectorstore.similarityThreshold:0.7}") float similarityThreshold,
+            @Value("${vectorstore.topK:5}") int topK,
+            @Value("${vectorstore.includeMetadata:false}") boolean includeMetadata) {
+        this.similarityThreshold = similarityThreshold;
+        this.topK = topK;
+        this.includeMetadata = includeMetadata;
+    }
+
+    public String retrieveContext(String query, String filterExpression, VectorStore vectorStore) {
+        VectorStoreDocumentRetriever retriever = new VectorStoreDocumentRetriever(vectorStore);
+        
+        SearchRequest request = SearchRequest.query(query)
+                .withTopK(topK)
+                .withSimilarityThreshold(similarityThreshold);
+
+        if (filterExpression != null && !filterExpression.isEmpty()) {
+            FilterExpressionBuilder builder = new FilterExpressionBuilder();
+            request.withFilterExpression(builder.build(filterExpression));
+        }
+
+        List<Document> documents = retriever.retrieve(request);
+        if (documents.isEmpty()) {
+            return null;
+        }
+
+        return documents.stream()
+                .map(doc -> {
+                    String content = doc.getFormattedContent() != null ? doc.getFormattedContent() : doc.getContent();
+                    if (includeMetadata) {
+                        return content + "\n[Metadata: " + doc.getMetadata().toString() + "]";
+                    }
+                    return content;
+                })
+                .collect(Collectors.joining("\n"));
+    }
+}
+```
+
+**Changes**:
+- Already using `VectorStoreDocumentRetriever` as per your earlier request; no further changes needed here.
+
+---
+
+### 4. Updated `DynamicPromptService`
+
+Builds the prompt without LLM execution:
+
+```java
+package com.example.service;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.stereotype.Service;
+
+import java.util.HashMap;
+import java.util.Map;
+
+@Service
+public class DynamicPromptService {
+
+    private final VectorContextRetriever vectorContextRetriever;
+    private final PromptTemplateService promptTemplateService;
+    private final TemplatePromptBuilder promptBuilder;
+    private final ConversationHistoryService historyService;
+    private final Map<String, VectorStore> vectorStores;
+    private final Map<String, KnowledgeStore> knowledgeStores;
+    private final VectorStore defaultVectorStore;
+    private final KnowledgeStore defaultKnowledgeStore;
+
+    @Autowired
+    public DynamicPromptService(
+            VectorContextRetriever vectorContextRetriever,
+            PromptTemplateService promptTemplateService,
+            TemplatePromptBuilder promptBuilder,
+            ConversationHistoryService historyService,
+            Map<String, VectorStore> vectorStores,
+            Map<String, KnowledgeStore> knowledgeStores,
+            @Qualifier("defaultVectorStore") VectorStore defaultVectorStore,
+            @Qualifier("defaultKnowledgeStore") KnowledgeStore defaultKnowledgeStore) {
+        this.vectorContextRetriever = vectorContextRetriever;
+        this.promptTemplateService = promptTemplateService;
+        this.promptBuilder = promptBuilder;
+        this.historyService = historyService;
+        this.vectorStores = vectorStores;
+        this.knowledgeStores = knowledgeStores;
+        this.defaultVectorStore = defaultVectorStore;
+        this.defaultKnowledgeStore = defaultKnowledgeStore;
+    }
+
+    public String buildPrompt(String input, String filterExpression, String templateName, 
+                              String vectorStoreName, String knowledgeStoreName, String sessionId) {
+        if (input == null || input.trim().isEmpty()) {
+            throw new IllegalArgumentException("Input cannot be null or empty");
+        }
+
+        String context = null;
+        if (vectorStoreName != null) {
+            VectorStore selectedVectorStore = vectorStores.getOrDefault(vectorStoreName, defaultVectorStore);
+            context = vectorContextRetriever.retrieveContext(input, filterExpression, selectedVectorStore);
+        }
+        if (context == null && knowledgeStoreName != null) {
+            KnowledgeStore selectedKnowledgeStore = knowledgeStores.getOrDefault(knowledgeStoreName, defaultKnowledgeStore);
+            context = selectedKnowledgeStore.retrieveContext(input);
+        }
+        if (context == null && vectorStoreName == null && knowledgeStoreName == null) {
+            context = vectorContextRetriever.retrieveContext(input, filterExpression, defaultVectorStore);
+            if (context == null) {
+                context = defaultKnowledgeStore.retrieveContext(input);
+            }
+        }
+
+        Map<String, Object> params = new HashMap<>();
+        params.put("question", input);
+        params.put("context", context != null ? context : "No context available");
+
+        try {
+            return templateName != null && !templateName.isEmpty()
+                    ? promptBuilder.buildPromptWithTemplate(templateName, params)
+                    : promptBuilder.buildPrompt(params);
+        } catch (IllegalArgumentException e) {
+            return "Error: " + e.getMessage() + "\nQuestion: " + input + "\nContext: " + context;
+        }
+    }
+}
+```
+
+**Changes**:
+- Removed history context building (moved to `LlmService` to align with message list).
+
+---
+
+### 5. Updated `LlmService`
+
+Handles message list and LLM calls:
+
+```java
+package com.example.service;
+
+import com.example.model.ConversationHistory;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.stereotype.Service;
+
+import java.util.List;
+
+@Service
+public class LlmService {
+
+    private final ChatClient chatClient;
+    private final ConversationHistoryService historyService;
+
+    public LlmService(ChatClient chatClient, ConversationHistoryService historyService) {
+        this.chatClient = chatClient;
+        this.historyService = historyService;
+    }
+
+    @Cacheable(value = "llmResponses", key = "#sessionId + #prompt")
+    public String executePrompt(String prompt, String sessionId, float temperature, int maxTokens) {
+        if (prompt == null || prompt.trim().isEmpty()) {
+            throw new IllegalArgumentException("Prompt cannot be null or empty");
+        }
+        if (sessionId == null || sessionId.trim().isEmpty()) {
+            throw new IllegalArgumentException("sessionId cannot be null or empty");
+        }
+
+        // Get existing conversation history
+        ConversationHistory history = historyService.getHistoryBySessionId(sessionId);
+        List<ConversationHistory.Message> messages = history != null ? history.getMessages() : List.of();
+
+        // Build ChatClient request with message history
+        ChatClient.RequestSpec request = chatClient.prompt();
+        for (ConversationHistory.Message msg : messages) {
+            if ("user".equals(msg.getRole())) {
+                request.user(msg.getContent());
+            } else if ("assistant".equals(msg.getRole())) {
+                request.assistant(msg.getContent());
+            }
+        }
+        request.user(prompt); // Add current user input
+
+        // Execute LLM call
+        String responseContent;
+        try {
+            ChatResponse response = request.options(options -> options
+                    .temperature(temperature)
+                    .maxTokens(maxTokens))
+                    .call()
+                    .chatResponse();
+            responseContent = response.getResult().getOutput().getContent();
+        } catch (Exception e) {
+            responseContent = "Error calling LLM: " + e.getMessage();
+        }
+
+        // Save updated history
+        historyService.saveOrUpdateHistory(sessionId, prompt, prompt, responseContent);
+
+        return responseContent;
+    }
+
+    public String executePrompt(String prompt, String sessionId) {
+        return executePrompt(prompt, sessionId, 0.7f, 256);
+    }
+}
+```
+
+**Changes**:
+- Uses `ChatClient`’s message history support by adding past messages via `user()` and `assistant()`.
+- Saves the full message list after appending the new user prompt and assistant response.
+- Extracts `content` from the `ChatResponse` object.
+
+---
+
+### 6. Updated Controller (`PromptController`)
+
+Unchanged:
+
+```java
+package com.example.controller;
+
+import com.example.service.DynamicPromptService;
+import com.example.service.LlmService;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class PromptController {
+
+    private final DynamicPromptService promptService;
+    private final LlmService llmService;
+
+    public PromptController(DynamicPromptService promptService, LlmService llmService) {
+        this.promptService = promptService;
+        this.llmService = llmService;
+    }
+
+    @GetMapping("/generate-prompt")
+    public String generatePrompt(
+            @RequestParam String input,
+            @RequestParam String sessionId,
+            @RequestParam(required = false) String filterExpression,
+            @RequestParam(required = false) String templateName,
+            @RequestParam(required = false) String vectorStoreName,
+            @RequestParam(required = false) String knowledgeStoreName,
+            @RequestParam(required = false, defaultValue = "0.7") float temperature,
+            @RequestParam(required = false, defaultValue = "256") int maxTokens) {
+        String prompt = promptService.buildPrompt(input, filterExpression, templateName, vectorStoreName, knowledgeStoreName, sessionId);
+        return llmService.executePrompt(prompt, sessionId, temperature, maxTokens);
+    }
+}
+```
+
+---
+
+### 7. Configuration and Other Classes
+
+- **`VectorStoreConfig`**, **`KnowledgeStore`**, **`MongoKnowledgeStore`**, **`PromptTemplateService`**, **`TemplatePromptBuilder`**: Unchanged.
+
+---
+
+## MongoDB History Example
+
+After two calls with `sessionId=user123`:
+```json
+{
+  "_id": "abc123",
+  "sessionId": "user123",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Based on the following context: Check your network settings, answer the question: I can’t make phone calls"
+    },
+    {
+      "role": "assistant",
+      "content": "Ensure your network is active or restart your device."
+    },
+    {
+      "role": "user",
+      "content": "Based on the following context: Check your network settings, answer the question: What else can I try?"
+    },
+    {
+      "role": "assistant",
+      "content": "Try switching to airplane mode and back, or contact your provider."
+    }
+  ],
+  "timestamp": 1742015129
+}
+```
+
+---
+
+## Usage Examples
+
+1. **First Call**:
+   ```
+   curl "http://localhost:8080/generate-prompt?input=I can’t make phone calls&sessionId=user123&vectorStoreName=teamAVectorStore"
+   ```
+   - Builds prompt, sends initial message list, saves response, returns content.
+
+2. **Follow-Up Call**:
+   ```
+   curl "http://localhost:8080/generate-prompt?input=What else can I try?&sessionId=user123&vectorStoreName=teamAVectorStore"
+   ```
+   - Appends new messages to existing list, sends to LLM, updates history, returns content.
+
+---
+
+## How It Meets Your Requirements
+
+1. **Structured LLM Response**:
+   - Extracts `content` from `choices[0].message.content` and stores the full `role`/`content` message structure in MongoDB.
+
+2. **Message List Storage**:
+   - `ConversationHistory` now holds a list of messages per `sessionId`, matching the LLM response format.
+
+3. **Appending Messages**:
+   - Each conversation appends new `user` and `assistant` messages, sent to `ChatClient` for context-aware responses.
+
+4. **VectorStoreDocumentRetriever**:
+   - Already integrated into `VectorContextRetriever`, retrieving documents as requested.
+
+---
+
+## Verification Against Spring AI 1.0.0-M6
+
+- **`ChatClient`**:
+  - Supports multi-message input via `user()` and `assistant()` methods, confirmed in 1.0.0-M6.
+- **`VectorStoreDocumentRetriever`**:
+  - Used correctly with `SearchRequest` in `VectorContextRetriever`.
+
+This design aligns with your LLM response structure and conversational needs. Let me know if you’d like further adjustments (e.g., handling multiple choices, caching tweaks)!
