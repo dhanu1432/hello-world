@@ -1,0 +1,367 @@
+To enforce that every flow has a prompt template associated with it, we can modify the `Flow` interface and its implementation to make the `templateName` (or a similar field representing the prompt template) a required attribute. This ensures that every flow bean must explicitly specify a prompt template at creation time, preventing flows from being defined without one. We can achieve this through:
+
+1. **Interface Design**: Make `getTemplateName()` a mandatory method in the `Flow` interface, with no default `null` allowed in the base implementation.
+2. **Validation**: Add runtime checks in the `BaseFlow` constructor and `FlowOrchestrator` to enforce the presence of a `templateName`.
+3. **Spring Bean Configuration**: Ensure all flow beans provide a non-null `templateName` when defined.
+
+Here’s how we’ll update the solution to enforce this requirement:
+
+---
+
+## Updated Solution
+
+### 1. Updated `Flow` Interface
+
+Make `templateName` implicitly required by not allowing `null` in documentation and base implementation:
+
+```java
+package com.example.flow;
+
+import org.springframework.ai.chat.messages.Message;
+
+import java.util.List;
+
+public interface Flow {
+    String getFlowIdentifier();           // Unique identifier for the flow
+    String getPromptText();              // Base prompt text for the flow
+    String getVectorStoreName();         // Optional, nullable
+    String getKnowledgeStoreName();      // Optional, nullable
+    String getTemplateName();            // Required prompt template name (cannot be null or empty)
+    String execute(String userInput, String sessionId, List<Message> history, 
+                   DynamicPromptService promptService, LlmService llmService);
+}
+```
+
+**Notes**:
+- `getTemplateName()` is now documented as required, signaling that implementations must provide a valid template name.
+
+---
+
+### 2. Updated `BaseFlow` (Enforce `templateName`)
+
+Add validation in the constructor:
+
+```java
+package com.example.flow;
+
+import com.example.service.DynamicPromptService;
+import com.example.service.LlmService;
+import org.springframework.ai.chat.messages.Message;
+
+import java.util.List;
+
+public abstract class BaseFlow implements Flow {
+
+    protected final String flowIdentifier;
+    protected final String promptText;
+    protected final String vectorStoreName;
+    protected final String knowledgeStoreName;
+    protected final String templateName;
+
+    public BaseFlow(String flowIdentifier, String promptText, String vectorStoreName, 
+                    String knowledgeStoreName, String templateName) {
+        if (flowIdentifier == null || flowIdentifier.trim().isEmpty()) {
+            throw new IllegalArgumentException("flowIdentifier cannot be null or empty");
+        }
+        if (promptText == null || promptText.trim().isEmpty()) {
+            throw new IllegalArgumentException("promptText cannot be null or empty");
+        }
+        if (templateName == null || templateName.trim().isEmpty()) {
+            throw new IllegalArgumentException("templateName cannot be null or empty; every flow must have a prompt template");
+        }
+
+        this.flowIdentifier = flowIdentifier;
+        this.promptText = promptText;
+        this.vectorStoreName = vectorStoreName;
+        this.knowledgeStoreName = knowledgeStoreName;
+        this.templateName = templateName;
+    }
+
+    @Override
+    public String getFlowIdentifier() {
+        return flowIdentifier;
+    }
+
+    @Override
+    public String getPromptText() {
+        return promptText;
+    }
+
+    @Override
+    public String getVectorStoreName() {
+        return vectorStoreName;
+    }
+
+    @Override
+    public String getKnowledgeStoreName() {
+        return knowledgeStoreName;
+    }
+
+    @Override
+    public String getTemplateName() {
+        return templateName;
+    }
+
+    @Override
+    public String execute(String userInput, String sessionId, List<Message> history, 
+                          DynamicPromptService promptService, LlmService llmService) {
+        String dynamicPrompt = promptService.buildPrompt(userInput, null, templateName, 
+                                                        vectorStoreName, knowledgeStoreName, sessionId);
+        String finalPrompt = promptText + "\n" + dynamicPrompt;
+        return llmService.executePrompt(finalPrompt, sessionId);
+    }
+}
+```
+
+**Changes**:
+- Added validation in the constructor to ensure `templateName` is non-null and non-empty.
+- This enforces the requirement at instantiation time, catching issues when Spring creates the beans.
+
+---
+
+### 3. Updated `FlowOrchestrator` (Additional Validation)
+
+Add a runtime check for safety:
+
+```java
+package com.example.service;
+
+import com.example.flow.Flow;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+
+import java.util.Map;
+
+@Service
+public class FlowOrchestrator {
+
+    private final Map<String, Flow> flows;
+    private final DynamicPromptService promptService;
+    private final LlmService llmService;
+    private final ConversationHistoryService historyService;
+
+    @Autowired
+    public FlowOrchestrator(Map<String, Flow> flows, DynamicPromptService promptService, 
+                            LlmService llmService, ConversationHistoryService historyService) {
+        this.flows = flows;
+        this.promptService = promptService;
+        this.llmService = llmService;
+        this.historyService = historyService;
+    }
+
+    public String executeFlow(String flowIdentifier, String userInput, String sessionId) {
+        Flow flow = flows.get(flowIdentifier + "Flow");
+        if (flow == null || !flow.getFlowIdentifier().equals(flowIdentifier)) {
+            throw new IllegalArgumentException("No flow found for flowIdentifier: " + flowIdentifier);
+        }
+        if (flow.getTemplateName() == null || flow.getTemplateName().trim().isEmpty()) {
+            throw new IllegalStateException("Flow '" + flowIdentifier + "' is missing a prompt template");
+        }
+
+        List<Message> history = historyService.getHistoryBySessionId(sessionId);
+        return flow.execute(userInput, sessionId, history, promptService, llmService);
+    }
+}
+```
+
+**Changes**:
+- Added a runtime check to ensure `getTemplateName()` isn’t null or empty, providing a safety net if a custom flow bypasses `BaseFlow`.
+
+---
+
+### 4. Updated `FlowConfig` (Ensure Template Association)
+
+All flow beans must specify a `templateName`:
+
+```java
+package com.example.config;
+
+import com.example.flow.BaseFlow;
+import com.example.flow.Flow;
+import com.example.service.DynamicPromptService;
+import com.example.service.LlmService;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.embedding.EmbeddingModel;
+import org.springframework.ai.openai.OpenAiChatModel;
+import org.springframework.ai.openai.OpenAiEmbeddingModel;
+import org.springframework.ai.openai.api.OpenAiApi;
+import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.ai.vectorstore.mongodb.MongoDBAtlasVectorStore;
+
+import java.util.List;
+
+@Configuration
+public class FlowConfig {
+
+    @Bean(name = "notAbleToCallFlow")
+    public Flow notAbleToCallFlow() {
+        return new BaseFlow(
+                "not_able_to_call",
+                "Provide troubleshooting steps for the following issue:",
+                "teamAVectorStore",
+                null,
+                "detailed" // Required template
+        );
+    }
+
+    @Bean(name = "noInternetFlow")
+    public Flow noInternetFlow() {
+        return new Flow() {
+            @Override
+            public String getFlowIdentifier() {
+                return "no_internet";
+            }
+
+            @Override
+            public String getPromptText() {
+                return "Diagnose and suggest fixes for:";
+            }
+
+            @Override
+            public String getVectorStoreName() {
+                return null;
+            }
+
+            @Override
+            public String getKnowledgeStoreName() {
+                return "teamBKnowledgeStore";
+            }
+
+            @Override
+            public String getTemplateName() {
+                return "basic"; // Required template
+            }
+
+            @Override
+            public String execute(String userInput, String sessionId, List<Message> history, 
+                                 DynamicPromptService promptService, LlmService llmService) {
+                String apiResult = simulateNetworkCheck(userInput);
+                String dynamicPrompt = promptService.buildPrompt(userInput, null, getTemplateName(), 
+                                                               getVectorStoreName(), getKnowledgeStoreName(), sessionId);
+                String finalPrompt = getPromptText() + "\n" + dynamicPrompt + "\nAPI Result: " + apiResult;
+                return llmService.executePrompt(finalPrompt, sessionId);
+            }
+
+            private String simulateNetworkCheck(String userInput) {
+                return "Network status: Router offline";
+            }
+        };
+    }
+
+    // Other beans (unchanged)
+    @Bean
+    public EmbeddingModel embeddingModel() {
+        return new OpenAiEmbeddingModel(new OpenAiApi("your-openai-api-key"));
+    }
+
+    @Bean
+    public ChatClient chatClient() {
+        OpenAiApi openAiApi = new OpenAiApi("your-openai-api-key");
+        OpenAiChatModel chatModel = new OpenAiChatModel(openAiApi);
+        return ChatClient.builder(chatModel).build();
+    }
+
+    @Bean(name = "defaultVectorStore")
+    public VectorStore defaultVectorStore(MongoTemplate mongoTemplate, EmbeddingModel embeddingModel) {
+        return MongoDBAtlasVectorStore.builder()
+                .withMongoTemplate(mongoTemplate)
+                .withEmbeddingModel(embeddingModel)
+                .withCollectionName("default_vector_collection")
+                .build();
+    }
+
+    @Bean(name = "teamAVectorStore")
+    public VectorStore teamAVectorStore(MongoTemplate mongoTemplate, EmbeddingModel embeddingModel) {
+        return MongoDBAtlasVectorStore.builder()
+                .withMongoTemplate(mongoTemplate)
+                .withEmbeddingModel(embeddingModel)
+                .withCollectionName("vector_collection_team_a")
+                .build();
+    }
+}
+```
+
+**Changes**:
+- Every flow bean must specify a `templateName` (e.g., "detailed", "basic").
+- Attempting to define a flow with `null` or empty `templateName` will fail at startup due to `BaseFlow` validation.
+
+---
+
+### 5. Example Prompt Templates
+
+Ensure these templates exist in your `prompt_templates` collection (used by `PromptTemplateService`):
+```json
+{
+  "_id": "detailed",
+  "name": "detailed",
+  "template": "Based on the context: {context}\nAnswer the question: {question}\nProvide detailed steps."
+}
+{
+  "_id": "basic",
+  "name": "basic",
+  "template": "Context: {context}\nQuestion: {question}\nRespond concisely."
+}
+```
+
+---
+
+## Usage Examples
+
+1. **Standard Flow**:
+   ```
+   curl "http://localhost:8080/generate-prompt?flowIdentifier=not_able_to_call&userInput=I can’t make phone calls&sessionId=user123"
+   ```
+   - Uses "detailed" template, returns detailed troubleshooting steps.
+
+2. **Custom Flow**:
+   ```
+   curl "http://localhost:8080/generate-prompt?flowIdentifier=no_internet&userInput=No internet connection&sessionId=user456"
+   ```
+   - Uses "basic" template, includes API result, returns concise response.
+
+---
+
+## How It Enforces Prompt Templates
+
+1. **Compile-Time Enforcement**:
+   - `BaseFlow` constructor requires a `templateName` parameter, so subclasses must provide it when extending.
+
+2. **Runtime Validation**:
+   - `BaseFlow` constructor throws an exception if `templateName` is null or empty, failing bean creation during Spring startup.
+   - `FlowOrchestrator` adds a secondary check at runtime, ensuring no flow slips through without a template.
+
+3. **Bean Definition**:
+   - Custom flows (not using `BaseFlow`) must implement `getTemplateName()` with a valid value, or the orchestrator will reject them.
+
+---
+
+## Benefits
+
+- **Mandatory Templates**: Every flow must associate with a prompt template, enforced at instantiation and runtime.
+- **Flexibility**: Custom flows can still override `execute()` for unique logic while adhering to the template requirement.
+- **Consistency**: Ensures all flows use a structured prompt-building process via `DynamicPromptService`.
+- **Early Detection**: Misconfigured flows fail at startup, not during execution.
+
+---
+
+## Handling Edge Cases
+
+If a developer accidentally defines a flow without a `templateName`:
+- **Using `BaseFlow`**: Spring will fail to start with an `IllegalArgumentException`.
+- **Custom `Flow` Implementation**: `FlowOrchestrator` will throw an exception at runtime when the flow is invoked.
+
+Example of a bad flow (will fail):
+```java
+@Bean(name = "badFlow")
+public Flow badFlow() {
+    return new BaseFlow("bad_flow", "Test prompt", null, null, null); // Fails at startup
+}
+```
+
+---
+
+This approach guarantees that every flow has a prompt template associated with it, meeting your requirement while preserving the flexibility of custom implementations. Let me know if you’d like to adjust the validation strategy or add more constraints!
