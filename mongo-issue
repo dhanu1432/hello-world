@@ -154,4 +154,98 @@ public class FlowConfig {
                 .build();
     }
 
-    // ...
+    // ... other beans ...
+}
+```
+
+- **Changes**:
+  - Used `ConnectionString` and `MongoClientSettings` for explicit configuration.
+  - Added debug prints to verify the connection at each step.
+- **Properties**:
+  ```properties
+  spring.data.mongodb.uri=mongodb+srv://user:pass@xxxxx.mongodb.net/my_db?retryWrites=true&w=majority
+  spring.data.mongodb.database=my_db
+  ```
+
+#### Solution 2: Handle Proxy/DNS Issues
+
+Since you’re using a proxy for OpenAI, it might interfere with MongoDB’s SRV resolution:
+- **Set JVM Proxy for MongoDB**:
+  - Add system properties in your application startup:
+    ```java
+    @SpringBootApplication
+    public class Application {
+        public static void main(String[] args) {
+            System.setProperty("http.proxyHost", "proxy.example.com");
+            System.setProperty("http.proxyPort", "8080");
+            System.setProperty("https.proxyHost", "proxy.example.com");
+            System.setProperty("https.proxyPort", "8080");
+            SpringApplication.run(Application.class, args);
+        }
+    }
+    ```
+  - Or via command line:
+    ```bash
+    java -Dhttp.proxyHost=proxy.example.com -Dhttp.proxyPort=8080 -Dhttps.proxyHost=proxy.example.com -Dhttps.proxyPort=8080 -jar your-app.jar
+    ```
+  - **Note**: MongoDB SRV resolution uses DNS over TCP/UDP, not HTTP, so an HTTP proxy might not help unless it’s a transparent network proxy.
+
+- **Bypass Proxy for MongoDB**:
+  - If your proxy doesn’t support DNS resolution for MongoDB Atlas, use a direct connection by adding your Atlas hosts to `noProxy`:
+    ```java
+    System.setProperty("http.nonProxyHosts", "*.mongodb.net");
+    ```
+
+- **Explicit Host List** (Alternative to SRV)**:
+  - Replace the SRV URI with a standard URI listing all shard hosts (find these in your Atlas dashboard under "Connect" > "MongoDB Drivers"):
+    ```properties
+    spring.data.mongodb.uri=mongodb://user:pass@cluster0-shard-00-00.abc123.mongodb.net:27017,cluster0-shard-00-01.abc123.mongodb.net:27017/my_db?retryWrites=true&w=majority
+    ```
+
+#### Solution 3: Disable Auto-Configuration
+
+Ensure no default `MongoTemplate` overrides your explicit one:
+```java
+@SpringBootApplication(exclude = {MongoAutoConfiguration.class, MongoDataAutoConfiguration.class})
+public class Application {
+    public static void main(String[] args) {
+        SpringApplication.run(Application.class, args);
+    }
+}
+```
+
+- Then rely solely on your `mongoClient` and `mongoTemplate` beans.
+
+---
+
+### Verification
+
+1. Run your app:
+   ```bash
+   java -jar your-app.jar --spring.profiles.active=teamA
+   ```
+2. Check debug output:
+   - Expected: `MongoClient Cluster: ... cluster0-shard-00-00.abc123.mongodb.net:27017 ...`
+   - Expected: `MongoTemplate Connection: [cluster0-shard-00-00.abc123.mongodb.net:27017, ...]`
+
+3. Test a flow:
+   ```
+   curl "http://localhost:8080/generate-prompt?flowIdentifier=simple_flow&userInput=What’s wrong?&sessionId=user123"
+   ```
+
+---
+
+### Why `localhost` Appeared
+
+- **SRV Resolution Failed**: The driver couldn’t resolve `xxxxx.mongodb.net` to actual hosts, possibly due to proxy/DNS issues, and defaulted to `localhost`.
+- **Config Clash**: Spring’s auto-configured `MongoTemplate` took precedence over your explicit `MongoClient`.
+
+---
+
+### Recommendation
+
+- Start with **Solution 1** to ensure your `MongoClient` and `MongoTemplate` are correctly wired.
+- If `localhost` persists, apply **Solution 2** to address proxy/DNS issues (test SRV resolution manually first).
+- Use **Solution 3** if you suspect auto-configuration interference.
+
+Let me know the debug output or any errors after applying these changes—I can refine the fix further!
