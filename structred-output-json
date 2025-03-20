@@ -1,0 +1,286 @@
+Let’s create an example of using **Structured Data Output** in Spring AI to get a JSON response from an AI model, integrated into your existing flow system. We’ll use your `SimpleFlow` as a starting point and modify it to request and process a JSON-structured output. This example assumes you’re using the `spring-ai-openai` library with a model that supports JSON mode (e.g., `gpt-4o` or `gpt-3.5-turbo-1106`).
+
+---
+
+## Example: JSON Output in `SimpleFlow`
+
+### Goal
+We’ll modify `SimpleFlow` to:
+- Ask the AI to diagnose a simple query (e.g., "What’s wrong?").
+- Return the response as a JSON object with fields like `problem`, `severity`, and `suggestion`.
+- Parse this JSON into a Java record and return a formatted string.
+
+---
+
+### 1. Define the Structured Output Type
+
+Create a Java record to represent the expected JSON structure:
+
+```java
+package com.example.flow;
+
+public record Diagnosis(
+    String problem, 
+    String severity, 
+    String suggestion
+) {}
+```
+
+- This corresponds to a JSON object like:
+  ```json
+  {
+    "problem": "Server down",
+    "severity": "High",
+    "suggestion": "Restart the server"
+  }
+  ```
+
+---
+
+### 2. Update `SimpleFlow`
+
+Modify `SimpleFlow` to request and handle JSON output:
+
+```java
+package com.example.flow;
+
+import com.example.service.DynamicPromptService;
+import com.example.service.LlmService;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.stereotype.Component;
+
+@Component
+public class SimpleFlow extends BaseFlow {
+
+    private static final String FLOW_IDENTIFIER = "simple_flow";
+    private static final String TEMPLATE_NAME = "basic";
+
+    public SimpleFlow() {
+        super(FLOW_IDENTIFIER, TEMPLATE_NAME);
+    }
+
+    public record Diagnosis(String problem, String severity, String suggestion) {}
+
+    @Override
+    public String execute(String userInput, String sessionId, DynamicPromptService promptService, LlmService llmService) {
+        // Build the prompt with JSON output instruction
+        String promptInstruction = userInput + "\nReturn your response as a JSON object with 'problem', 'severity', and 'suggestion' fields.";
+        String dynamicPrompt = promptService.buildPrompt(promptInstruction, null, getTemplateName(), 
+                                                       getVectorStore(), getKnowledgeStore(), sessionId);
+        String finalPrompt = getPromptText() + "\n" + dynamicPrompt;
+
+        // Use ChatClient to get structured JSON output
+        ChatClient chatClient = ChatClient.builder(llmService.getChatModel()).build();
+        Diagnosis diagnosis = chatClient.prompt()
+            .user(finalPrompt)
+            .call()
+            .entity(Diagnosis.class); // Maps JSON to Diagnosis record
+
+        // Format the result as a string (or return JSON directly if preferred)
+        return String.format("Problem: %s, Severity: %s, Suggestion: %s", 
+                            diagnosis.problem(), diagnosis.severity(), diagnosis.suggestion());
+    }
+}
+```
+
+**Key Changes**:
+- Added a nested `Diagnosis` record to define the expected JSON structure.
+- Updated the prompt to explicitly request JSON output with specific fields.
+- Used `ChatClient.call().entity(Diagnosis.class)` to parse the AI’s JSON response into the `Diagnosis` record.
+- Formatted the result as a human-readable string.
+
+---
+
+### 3. Update `LlmService` (Optional)
+
+If your `LlmService` directly controls the `ChatModel`, you might need to ensure it supports JSON mode. Here’s an updated version:
+
+```java
+package com.example.service;
+
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.openai.OpenAiChatModel;
+import org.springframework.ai.openai.OpenAiChatOptions;
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.stereotype.Service;
+
+import java.util.List;
+
+@Service
+public class LlmService {
+
+    private final ChatClient chatClient;
+    private final ChatModel chatModel;
+    private final ConversationHistoryService historyService;
+
+    public LlmService(ChatClient.Builder chatClientBuilder, OpenAiChatModel chatModel, ConversationHistoryService historyService) {
+        this.chatClient = chatClientBuilder.build();
+        this.chatModel = chatModel;
+        this.historyService = historyService;
+    }
+
+    @Cacheable(value = "llmResponses", key = "#sessionId + #prompt")
+    public String executePrompt(String prompt, String sessionId, float temperature, int maxTokens) {
+        if (prompt == null || prompt.trim().isEmpty()) {
+            throw new IllegalArgumentException("Prompt cannot be null or empty");
+        }
+        if (sessionId == null || sessionId.trim().isEmpty()) {
+            throw new IllegalArgumentException("sessionId cannot be null or empty");
+        }
+
+        List<Message> messages = historyService.getHistoryBySessionId(sessionId);
+        ChatClient.RequestSpec request = chatClient.prompt();
+        for (Message msg : messages) {
+            if ("user".equals(msg.getMessageType())) {
+                request.user(msg.getContent());
+            } else if ("assistant".equals(msg.getMessageType())) {
+                request.assistant(msg.getContent());
+            }
+        }
+        request.user(prompt);
+
+        String responseContent;
+        try {
+            ChatResponse response = request.options(OpenAiChatOptions.builder()
+                    .withTemperature(temperature)
+                    .withMaxTokens(maxTokens)
+                    .withResponseFormat(new OpenAiChatOptions.ResponseFormat("json_object")) // Enforce JSON output
+                    .build())
+                .call()
+                .chatResponse();
+            responseContent = response.getResult().getOutput().getContent();
+        } catch (Exception e) {
+            responseContent = "Error calling LLM: " + e.getMessage();
+        }
+
+        historyService.saveOrUpdateHistory(sessionId, prompt, responseContent);
+        return responseContent;
+    }
+
+    public String executePrompt(String prompt, String sessionId) {
+        return executePrompt(prompt, sessionId, 0.7f, 256);
+    }
+
+    public ChatModel getChatModel() {
+        return chatModel;
+    }
+}
+```
+
+**Changes**:
+- Added `.withResponseFormat(new OpenAiChatOptions.ResponseFormat("json_object"))` to enforce JSON output from OpenAI.
+- Exposed `getChatModel()` so flows can use the underlying `ChatModel` with `ChatClient`.
+
+---
+
+### 4. Configuration (`FlowConfig`)
+
+Ensure your `ChatModel` supports JSON-capable models:
+
+```java
+@Bean
+public ChatClient chatClient(OpenAiChatModel chatModel) {
+    return ChatClient.builder(chatModel).build();
+}
+
+@Bean
+public OpenAiChatModel chatModel() {
+    OpenAIClient openAIClient = buildOpenAIClient();
+    OpenAiApi openAiApi = new OpenAiApi(openAIClient);
+    return new OpenAiChatModel(openAiApi, OpenAiChatOptions.builder()
+        .withModel("gpt-4o") // Use a model that supports JSON mode
+        .build());
+}
+```
+
+- **Model**: Use `gpt-4o` or `gpt-3.5-turbo-1106` (JSON mode supported).
+
+---
+
+### 5. Test the Flow
+
+#### Request
+```
+curl "http://localhost:8080/generate-prompt?flowIdentifier=simple_flow&userInput=What’s wrong?&sessionId=user123"
+```
+
+#### AI Response (Internal JSON)
+The AI might return:
+```json
+{
+  "problem": "Unknown issue",
+  "severity": "Medium",
+  "suggestion": "Check logs for more details"
+}
+```
+
+#### Flow Output
+```
+Problem: Unknown issue, Severity: Medium, Suggestion: Check logs for more details
+```
+
+---
+
+### Alternative: Raw JSON Output
+
+If you want the flow to return the raw JSON string instead of formatting it:
+
+```java
+@Override
+public String execute(String userInput, String sessionId, DynamicPromptService promptService, LlmService llmService) {
+    String promptInstruction = userInput + "\nReturn your response as a JSON object with 'problem', 'severity', and 'suggestion' fields.";
+    String dynamicPrompt = promptService.buildPrompt(promptInstruction, null, getTemplateName(), 
+                                                   getVectorStore(), getKnowledgeStore(), sessionId);
+    String finalPrompt = getPromptText() + "\n" + dynamicPrompt;
+
+    ChatClient chatClient = ChatClient.builder(llmService.getChatModel()).build();
+    String jsonResponse = chatClient.prompt()
+        .user(finalPrompt)
+        .call()
+        .content(); // Get raw JSON string
+
+    return jsonResponse; // Return raw JSON
+}
+```
+
+#### Output
+```
+{"problem": "Unknown issue", "severity": "Medium", "suggestion": "Check logs for more details"}
+```
+
+---
+
+### Notes
+
+1. **Model Compatibility**:
+   - Ensure your OpenAI model supports JSON mode (`gpt-4o`, `gpt-3.5-turbo-1106`, etc.). Older models might not comply fully, requiring stricter prompt engineering.
+
+2. **Prompt Engineering**:
+   - The instruction `"Return your response as a JSON object..."` is critical. Without it, the AI might not structure the output correctly.
+
+3. **Error Handling**:
+   - If the AI returns invalid JSON, `entity(Diagnosis.class)` might throw an exception. Add try-catch if needed:
+     ```java
+     try {
+         return chatClient.prompt().user(finalPrompt).call().entity(Diagnosis.class);
+     } catch (Exception e) {
+         return "Error parsing JSON: " + e.getMessage();
+     }
+     ```
+
+4. **Proxy Integration**:
+   - Your existing proxy setup with `NettyAsyncHttpClientBuilder` remains unaffected. This JSON output works over the proxy as long as SSL issues are resolved.
+
+---
+
+### Purpose in Context
+
+In your flow system:
+- **Structured JSON**: Enables `SimpleFlow` to return data that downstream systems (e.g., JPA, REST APIs) can consume directly.
+- **Consistency**: Ensures `teamA` and `teamB` get uniform JSON responses, regardless of their prompts or stores.
+- **Flexibility**: You can easily change the `Diagnosis` record to match different use cases without altering the flow logic.
+
+This example demonstrates how Spring AI’s structured output can streamline your application with JSON responses. Let me know if you’d like to tweak the structure or add more fields!
