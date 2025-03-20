@@ -1,0 +1,157 @@
+The output you’re seeing—`clusterSettings=[{127.0.0.1:27017], srvHost=xxxxx, srvServiceName=mongodb, mode=LOAD_BALANCED]`—comes from the `MongoClient`’s internal configuration when you print something like `mongoTemplate.getDb().getMongoClient().getAllAddress()` or similar debugging info. This indicates a mix of configurations that’s causing your `MongoTemplate` to connect to `localhost` (127.0.0.1:27017) despite your intent to use a MongoDB Atlas cluster (suggested by `srvHost=xxxxx`). Let’s break it down and fix it.
+
+---
+
+### What This Output Means
+
+1. **`clusterSettings=[{127.0.0.1:27017}]`**:
+   - The `MongoClient` is configured to connect to `127.0.0.1:27017` (localhost), which is MongoDB’s default when no explicit hosts are resolved or overridden.
+
+2. **`srvHost=xxxxx`**:
+   - This suggests you’ve provided a MongoDB SRV connection string (e.g., `mongodb+srv://user:pass@xxxxx.mongodb.net/db`), where `xxxxx` is your Atlas cluster name (e.g., `cluster0`). SRV records are used to dynamically resolve the actual hostnames of your Atlas cluster (e.g., `cluster0-abc123.mongodb.net`).
+
+3. **`srvServiceName=mongodb`**:
+   - This is the default DNS SRV service name for MongoDB, indicating the driver is looking up SRV records under `_mongodb._tcp.xxxxx.mongodb.net`.
+
+4. **`mode=LOAD_BALANCED`**:
+   - The connection mode is set to `LOAD_BALANCED`, which is typically used with MongoDB Atlas when behind a load balancer or proxy. However, this mode requires proper resolution of SRV records, and it seems the resolution isn’t working correctly, falling back to `localhost`.
+
+---
+
+### Why It’s Connecting to `localhost`
+
+Despite providing an SRV URI, the `MongoClient` is resolving to `127.0.0.1:27017`. Here’s why this might be happening:
+
+1. **DNS Resolution Failure**:
+   - The MongoDB Java driver couldn’t resolve the SRV records for `xxxxx.mongodb.net` (e.g., due to network issues, proxy interference, or DNS misconfiguration), so it defaults to `localhost:27017`.
+
+2. **Proxy Interference**:
+   - Your application uses a proxy for OpenAI requests via `NettyAsyncHttpClientBuilder`. If this proxy (or a system-wide proxy) is misconfigured, it might block or misroute DNS lookups for MongoDB Atlas, causing the SRV resolution to fail.
+
+3. **Mixed Configuration**:
+   - You might have an explicit `MongoClient` with an Atlas URI, but Spring’s auto-configured `MongoTemplate` (or another bean) is overriding it with default settings (`localhost`).
+
+4. **SRV URI Misuse**:
+   - If your `spring.data.mongodb.uri` is malformed or incomplete (e.g., missing credentials, options, or database name), the driver might fail to connect properly and revert to defaults.
+
+5. **Local MongoDB Running**:
+   - If a MongoDB instance is running locally on `127.0.0.1:27017`, the driver might detect and connect to it as a fallback.
+
+---
+
+### Debugging Steps
+
+1. **Verify the Connection String**:
+   - Check your `spring.data.mongodb.uri` in `application.properties` (or profile-specific files):
+     ```properties
+     spring.data.mongodb.uri=mongodb+srv://user:pass@xxxxx.mongodb.net/my_db?retryWrites=true&w=majority
+     spring.data.mongodb.database=my_db
+     ```
+   - Ensure `xxxxx` matches your Atlas cluster (e.g., `cluster0`), and credentials are correct.
+
+2. **Test SRV Resolution Manually**:
+   - Use `dig` or `nslookup` to verify SRV records:
+     ```bash
+     dig _mongodb._tcp.xxxxx.mongodb.net SRV
+     ```
+   - Expected output:
+     ```
+     _mongodb._tcp.xxxxx.mongodb.net. 60 IN SRV 0 0 27017 cluster0-shard-00-00.abc123.mongodb.net.
+     _mongodb._tcp.xxxxx.mongodb.net. 60 IN SRV 0 0 27017 cluster0-shard-00-01.abc123.mongodb.net.
+     ```
+   - If this fails, your DNS resolution is the issue (possibly proxy-related).
+
+3. **Enable Detailed MongoDB Logging**:
+   - Add to `application.properties`:
+     ```properties
+     logging.level.org.springframework.data.mongodb=DEBUG
+     logging.level.com.mongodb=DEBUG
+     ```
+   - Look for:
+     - DNS resolution errors (e.g., "Failed to resolve SRV records").
+     - Connection attempts to `127.0.0.1:27017`.
+
+4. **Print `MongoClient` Details**:
+   - In `FlowConfig`:
+     ```java
+     @Bean
+     public MongoTemplate mongoTemplate(MongoClient mongoClient) {
+         System.out.println("MongoClient Settings: " + mongoClient.getClusterDescription());
+         MongoTemplate template = new MongoTemplate(mongoClient, mongoDatabase);
+         System.out.println("MongoTemplate Connection: " + template.getDb().getMongoClient().getAllAddress());
+         return template;
+     }
+     ```
+   - Compare the output to your expected Atlas cluster.
+
+5. **Check for Local MongoDB**:
+   - Run `mongo` or `ps aux | grep mongod` to see if a local instance is running. If so, stop it:
+     ```bash
+     sudo systemctl stop mongod
+     ```
+
+---
+
+### Fixing the Issue
+
+Based on your setup (explicit `MongoClient` and `MongoTemplate`), here’s how to ensure `MongoTemplate` uses your Atlas cluster instead of `localhost`:
+
+#### Solution 1: Correct `MongoClient` Configuration
+
+Update `FlowConfig` to ensure the `MongoClient` is properly configured and tied to `MongoTemplate`:
+
+```java
+package com.example.config;
+
+import com.mongodb.ConnectionString;
+import com.mongodb.MongoClientSettings;
+import com.mongodb.client.MongoClient;
+import com.mongodb.client.MongoClients;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.ai.embedding.EmbeddingModel;
+import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.ai.vectorstore.mongodb.MongoDBAtlasVectorStore;
+
+@Configuration
+@EnableJpaRepositories(basePackages = "com.example.repository")
+public class FlowConfig {
+
+    @Value("${spring.data.mongodb.uri}")
+    private String mongoUri;
+
+    @Value("${spring.data.mongodb.database}")
+    private String mongoDatabase;
+
+    @Bean
+    public MongoClient mongoClient() {
+        ConnectionString connectionString = new ConnectionString(mongoUri);
+        MongoClientSettings settings = MongoClientSettings.builder()
+                .applyConnectionString(connectionString)
+                .build();
+        MongoClient client = MongoClients.create(settings);
+        System.out.println("MongoClient Cluster: " + client.getClusterDescription());
+        return client;
+    }
+
+    @Bean
+    public MongoTemplate mongoTemplate(MongoClient mongoClient) {
+        MongoTemplate template = new MongoTemplate(mongoClient, mongoDatabase);
+        System.out.println("MongoTemplate Connection: " + template.getDb().getMongoClient().getAllAddress());
+        return template;
+    }
+
+    @Bean(name = "defaultVectorStore")
+    public VectorStore defaultVectorStore(MongoTemplate mongoTemplate, EmbeddingModel embeddingModel) {
+        System.out.println("VectorStore MongoTemplate Connection: " + mongoTemplate.getDb().getMongoClient().getAllAddress());
+        return MongoDBAtlasVectorStore.builder()
+                .withMongoTemplate(mongoTemplate)
+                .withEmbeddingModel(embeddingModel)
+                .withCollectionName("default_vector_collection")
+                .build();
+    }
+
+    // ...
