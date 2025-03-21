@@ -1,0 +1,299 @@
+Thank you for testing the manual vector search and sharing your specific values. The fact that you’re seeing the same `Error connecting to localhost:28000 ... Connection refused` during the aggregation operation with `MongoTemplate`—even when bypassing Spring AI’s `MongoDBAtlasVectorStore`—is surprising and significant. Since you can query the collection directly with `MongoTemplate` but the `$vectorSearch` aggregation fails, this points to a deeper issue with how the MongoDB driver or Atlas client handles vector search operations in your AWS EKS environment. Let’s analyze this and find a solution.
+
+---
+
+### Your Setup
+
+Here’s what you’ve provided for your manual search:
+
+- **Vector Search Stage**:
+  - `index`: `"vector_index"`
+  - `path`: `"embedding"`
+  - `queryVector`: `queryEmbedding` (float array from your `EmbeddingModel`)
+  - `exact`: `true`
+  - `numCandidates`: `10`
+  - `limit`: `5`
+
+- **Aggregation Projection**:
+  - `_id`: `0` (exclude)
+  - `text`: `1` (include)
+  - `metadata`: `1` (include)
+  - `score`: `$meta: "vectorSearchScore"`
+
+- **Error**: `Error connecting to localhost:28000 ... Connection refused` during `mongoTemplate.aggregate()`.
+
+- **Context**: 
+  - Direct queries (e.g., `mongoTemplate.find()`) work on your collection.
+  - Spring AI `1.0.0-M6`, AWS EKS, MongoDB Atlas, bastion proxy for OpenAI.
+
+---
+
+### Why This Happens
+
+Since the manual `$vectorSearch` aggregation with `MongoTemplate` also fails with `localhost:28000`, the issue isn’t solely Spring AI’s `MongoDBAtlasVectorStore`. Here’s the analysis:
+
+1. **Vector Search Specific**:
+   - Your successful direct queries suggest the `MongoClient` connects to Atlas (`xxxxx.mongodb.net:27017`) for standard operations. However, the `$vectorSearch` aggregation—whether via Spring AI or `MongoTemplate`—triggers a connection to `localhost:28000`.
+   - Atlas’s `$vectorSearch` might involve a different execution path in the MongoDB driver (e.g., a search-specific endpoint or proxy), which is misconfigured or unsupported in your setup.
+
+2. **MongoDB Driver Behavior**:
+   - The MongoDB Java driver (e.g., `5.1.0` from Spring Boot) might default to `localhost:28000` for vector search if it can’t resolve or connect to Atlas’s search infrastructure. The `28000` port isn’t standard (MongoDB uses `27017`), suggesting an internal fallback or misconfiguration.
+
+3. **EKS Networking**:
+   - Your EKS pod might lack proper egress or DNS resolution for Atlas’s vector search endpoints. While standard queries work (likely cached or using a different connection), `$vectorSearch` might require additional network access that’s blocked or misrouted.
+
+4. **Atlas Configuration**:
+   - The `vector_index` might be misconfigured, or the `exact: true` parameter (non-standard in Atlas `$vectorSearch`) could confuse the driver, leading to an unexpected connection attempt.
+
+---
+
+### Debugging Confirmation
+
+Let’s test the aggregation directly to isolate the issue:
+
+```java
+@Service
+public class VectorSearchService {
+
+    private final MongoTemplate mongoTemplate;
+    private final EmbeddingModel embeddingModel;
+
+    public VectorSearchService(MongoTemplate mongoTemplate, EmbeddingModel embeddingModel) {
+        this.mongoTemplate = mongoTemplate;
+        this.embeddingModel = embeddingModel;
+    }
+
+    public List<Document> retrieve(String query) {
+        System.out.println("MongoTemplate Hosts Before Aggregation: " + mongoTemplate.getDb().getMongoClient().getAllAddress());
+        
+        // Test a simple query first
+        Document testDoc = mongoTemplate.findOne(new org.springframework.data.mongodb.core.query.Query(), Document.class, "vector_team_a");
+        System.out.println("Test Query Result: " + (testDoc != null ? testDoc.toJson() : "null"));
+
+        float[] queryEmbedding = embeddingModel.embed(query);
+
+        AggregationOperation vectorSearch = Aggregation.stage(new com.mongodb.BasicDBObject("$vectorSearch", 
+            new com.mongodb.BasicDBObject()
+                .append("index", "vector_index")
+                .append("path", "embedding")
+                .append("queryVector", queryEmbedding)
+                .append("exact", true) // Note: This might not be valid
+                .append("numCandidates", 10)
+                .append("limit", 5)
+        ));
+
+        AggregationOperation project = Aggregation.stage(new com.mongodb.BasicDBObject("$project", 
+            new com.mongodb.BasicDBObject()
+                .append("_id", 0)
+                .append("text", 1)
+                .append("metadata", 1)
+                .append("score", new com.mongodb.BasicDBObject("$meta", "vectorSearchScore"))
+        ));
+
+        Aggregation aggregation = Aggregation.newAggregation(vectorSearch, project);
+
+        try {
+            List<com.mongodb.DBObject> results = mongoTemplate.aggregate(aggregation, "vector_team_a", com.mongodb.DBObject.class)
+                    .getMappedResults();
+            System.out.println("Aggregation Successful: " + results.size());
+            return results.stream()
+                    .filter(result -> (double) result.get("score") >= 0.7)
+                    .map(result -> {
+                        Map<String, Object> metadata = (Map<String, Object>) result.get("metadata");
+                        if (metadata == null) {
+                            metadata = new java.util.HashMap<>();
+                        }
+                        metadata.put("similarityScore", result.get("score"));
+                        return new Document((String) result.get("text"), metadata);
+                    })
+                    .collect(Collectors.toList());
+        } catch (Exception e) {
+            System.err.println("Aggregation Failed: " + e.getMessage());
+            e.printStackTrace();
+            throw e;
+        }
+    }
+}
+```
+
+- **Replace**: `"vector_team_a"` with your actual collection name.
+- **Check Logs**: Look for:
+  - `MongoTemplate Hosts Before Aggregation`: Should be Atlas hosts.
+  - `Test Query Result`: Should show a document.
+  - `Aggregation Failed`: Exact error details.
+
+---
+
+### Fixing the Issue
+
+#### Step 1: Validate `$vectorSearch` Parameters
+
+- **Remove `exact: true`**:
+  - Atlas `$vectorSearch` doesn’t support an `exact` parameter (it’s approximate by nature). This might confuse the driver. Update to:
+    ```java
+    AggregationOperation vectorSearch = Aggregation.stage(new com.mongodb.BasicDBObject("$vectorSearch", 
+        new com.mongodb.BasicDBObject()
+            .append("index", "vector_index")
+            .append("path", "embedding")
+            .append("queryVector", queryEmbedding)
+            .append("numCandidates", 10)
+            .append("limit", 5)
+    ));
+    ```
+
+- **Verify Index**:
+  - Ensure `vector_index` exists:
+    ```javascript
+    db.vector_team_a.getSearchIndexes()
+    ```
+  - Should return something like:
+    ```json
+    {
+      "name": "vector_index",
+      "definition": {
+        "fields": [
+          {
+            "type": "vector",
+            "path": "embedding",
+            "numDimensions": 1536,
+            "similarity": "cosine"
+          }
+        ]
+      }
+    }
+    ```
+
+#### Step 2: Test Native MongoDB Client
+
+Since `MongoTemplate` failed, try the native client directly:
+
+```java
+import com.mongodb.client.MongoClients;
+import com.mongodb.client.MongoClient;
+import com.mongodb.client.MongoCollection;
+import com.mongodb.client.model.search.SearchOperator;
+import org.bson.Document;
+
+public class NativeVectorSearch {
+
+    public static void testVectorSearch(String uri, String queryEmbedding[]) {
+        try (MongoClient mongoClient = MongoClients.create(uri)) {
+            MongoCollection<Document> collection = mongoClient.getDatabase("teamA_db")
+                    .getCollection("vector_team_a");
+
+            Document pipeline = new Document("$vectorSearch", 
+                new Document()
+                    .append("index", "vector_index")
+                    .append("path", "embedding")
+                    .append("queryVector", queryEmbedding)
+                    .append("numCandidates", 10)
+                    .append("limit", 5)
+            ).append("$project", 
+                new Document()
+                    .append("_id", 0)
+                    .append("text", 1)
+                    .append("metadata", 1)
+                    .append("score", new Document("$meta", "vectorSearchScore"))
+            );
+
+            List<Document> results = collection.aggregate(java.util.Arrays.asList(pipeline)).into(new java.util.ArrayList<>());
+            System.out.println("Native Results: " + results.size());
+            results.forEach(System.out::println);
+        } catch (Exception e) {
+            System.err.println("Native Search Failed: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    public static void main(String[] args) {
+        String uri = "mongodb+srv://teamA_user:teamA_pass@xxxxx.mongodb.net/teamA_db?retryWrites=true&w=majority";
+        float[] queryEmbedding = new float[1536]; // Replace with actual embedding
+        testVectorSearch(uri, queryEmbedding);
+    }
+}
+```
+
+- **Run Locally First**: Test outside EKS to isolate the environment.
+- **If It Fails**: Same `localhost:28000` error suggests a driver or Atlas config issue.
+
+#### Step 3: EKS Networking Fix
+
+- **Egress Rules**:
+  - Ensure your EKS pod’s security group allows outbound TCP `27017` to Atlas IPs (check Atlas "Network Access").
+  - Test connectivity:
+    ```bash
+    kubectl exec -it <pod-name> -- telnet xxxxx.mongodb.net 27017
+    ```
+
+- **DNS**:
+  - Verify SRV resolution:
+    ```bash
+    kubectl exec -it <pod-name> -- nslookup xxxxx.mongodb.net
+    ```
+  - Use explicit hosts if SRV fails:
+    ```properties
+    spring.data.mongodb.uri=mongodb://teamA_user:teamA_pass@cluster0-shard-00-00.abc123.mongodb.net:27017,cluster0-shard-00-01.abc123.mongodb.net:27017/teamA_db?retryWrites=true&w=majority
+    ```
+
+- **SSH Tunnel**:
+  - Add a sidecar:
+    ```yaml
+    spec:
+      containers:
+      - name: app
+        image: your-app-image:tag
+        env:
+        - name: SPRING_DATA_MONGODB_URI
+          value: "mongodb://teamA_user:teamA_pass@localhost:27017/teamA_db?retryWrites=true&w=majority"
+      - name: ssh-tunnel
+        image: alpine:latest
+        command: ["/bin/sh", "-c"]
+        args:
+        - "apk add openssh-client; ssh -L 27017:xxxxx.mongodb.net:27017 user@bastion-host -N"
+    ```
+
+#### Step 4: Downgrade MongoDB Driver
+
+- **Current**: Spring Boot `3.3.0` uses MongoDB driver `5.1.0`. Test an older version (e.g., `4.11.0`):
+  ```groovy
+  dependencies {
+      implementation ('org.springframework.boot:spring-boot-starter-data-mongodb') {
+          exclude group: 'org.mongodb', module: 'mongodb-driver-sync'
+      }
+      implementation 'org.mongodb:mongodb-driver-sync:4.11.0'
+  }
+  ```
+
+---
+
+### Recommended Next Steps
+
+1. **Remove `exact: true`**:
+   - Update the aggregation and redeploy:
+     ```bash
+     ./gradlew clean build
+     docker build -t your-app-image:tag .
+     docker push your-app-image:tag
+     kubectl apply -f deployment.yaml
+     ```
+
+2. **Test Native Client Locally**:
+   - Run the `NativeVectorSearch` code outside EKS to confirm Atlas connectivity.
+
+3. **Check Logs**:
+   - Share output from `kubectl logs -f deployment/your-app`, especially around `Aggregation Failed`.
+
+4. **Networking**:
+   - Test egress and DNS in EKS; use the tunnel if needed.
+
+5. **Driver Downgrade**:
+   - If the above fails, try the older driver version.
+
+---
+
+### Why `localhost:28000` Persists
+
+- **Driver Bug**: MongoDB driver might misroute `$vectorSearch` to `localhost:28000` if Atlas’s search endpoint isn’t reachable.
+- **Atlas Config**: Possible misconfiguration in your cluster or index triggering this behavior.
+
+Let me know your collection name (if not `vector_team_a`) and the updated logs— we’ll get this sorted!
