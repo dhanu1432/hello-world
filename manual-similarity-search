@@ -1,0 +1,333 @@
+This is a critical update: you can query the `default_vector_collection` directly using `MongoTemplate` with a standard query, but the similarity search via `MongoDBAtlasVectorStore.similaritySearch()`—even when freshly created with the same working `MongoTemplate` or using the native MongoDB client—still fails with `Error connecting to localhost:28000 ... Connection refused`. This strongly points to an issue specific to Spring AI’s vector search implementation in `1.0.0-M6`, rather than your MongoDB Atlas connection, EKS networking, or `MongoTemplate` configuration. Let’s analyze this and explore solutions.
+
+---
+
+### Key Insights
+
+1. **Direct Query Works**:
+   - You can query `default_vector_collection` with `MongoTemplate` (e.g., `mongoTemplate.find(...)`), confirming that:
+     - Your Atlas connection (`xxxxx.mongodb.net:27017`) is functional.
+     - The `MongoClient` and `MongoTemplate` are correctly configured for general operations.
+     - The collection and data exist.
+
+2. **Similarity Search Fails**:
+   - The failure occurs only during `MongoDBAtlasVectorStore.similaritySearch()`, triggered by `VectorStoreDocumentRetriever.retrieve()`. Even when:
+     - Using the same `MongoTemplate` that works for queries.
+     - Creating a new `MongoDBAtlasVectorStore` right before retrieval.
+     - Using the native MongoDB client directly.
+   - The consistent `localhost:28000` error suggests Spring AI is overriding the connection settings specifically for vector search operations.
+
+3. **Native Client Also Fails**:
+   - When you tried the native MongoDB client (e.g., `MongoClients.create()`), it still hit `localhost:28000`. This is surprising because the native client should respect your connection string unless Spring AI is injecting a faulty configuration.
+
+4. **Spring AI `1.0.0-M6` Culprit**:
+   - The issue is isolated to Spring AI’s vector search logic, likely in how it constructs the `$vectorSearch` aggregation pipeline or interacts with the MongoDB driver. The `localhost:28000` port isn’t a standard MongoDB default (it’s `27017`), indicating a hardcoded or misconfigured setting within Spring AI.
+
+---
+
+### Why This Happens
+
+- **Spring AI Bug**: In `MongoDBAtlasVectorStore.similaritySearch()`, Spring AI builds an aggregation pipeline using the Atlas `$vectorSearch` operator. The error suggests that it:
+  - Overrides the `MongoClient` or connection settings during this operation.
+  - Attempts to connect to `localhost:28000`, possibly assuming a local proxy or load balancer (a common setup in some Atlas testing configs) that doesn’t exist in your EKS environment.
+- **Aggregation Pipeline Execution**: The failure occurs in `MongoTemplate.aggregate()` (called by `MongoDBAtlasVectorStore`), but only for vector search, not standard queries, pointing to a specific misstep in Spring AI’s pipeline construction or driver handling.
+- **EKS Context**: While EKS networking could block Atlas access, your successful direct queries rule this out as the primary cause.
+
+---
+
+### Debugging Confirmation
+
+Let’s verify the `MongoTemplate` state right before the similarity search:
+
+```java
+public List<Document> retrieve(String query, MongoTemplate mongoTemplate, VectorStore vectorStore) {
+    // Test direct query
+    Document result = mongoTemplate.findOne(new org.springframework.data.mongodb.core.query.Query(), Document.class, "default_vector_collection");
+    System.out.println("Direct Query Result: " + (result != null ? result.toJson() : "null"));
+    System.out.println("MongoTemplate Hosts Before Retrieval: " + mongoTemplate.getDb().getMongoClient().getAllAddress());
+
+    VectorStoreDocumentRetriever retriever = VectorStoreDocumentRetriever.builder()
+            .vectorStore(vectorStore)
+            .similarityThreshold(0.7)
+            .topK(5)
+            .build();
+
+    try {
+        List<Document> docs = retriever.retrieve(Query.builder().text(query).build());
+        System.out.println("Retrieval Successful - Docs: " + docs.size());
+        return docs;
+    } catch (Exception e) {
+        System.err.println("Retrieval Failed: " + e.getMessage());
+        e.printStackTrace();
+        throw e;
+    }
+}
+```
+
+- **Expected**:
+  - `Direct Query Result`: Should show data from `default_vector_collection`.
+  - `MongoTemplate Hosts Before Retrieval`: Should show `[cluster0-shard-00-00.abc123.mongodb.net:27017, ...]`.
+  - If it fails at `retrieve()`, Spring AI is the issue.
+
+---
+
+### Options to Resolve
+
+Since the problem is tied to Spring AI’s vector search, here are your options:
+
+#### Option 1: Manual Vector Search with `MongoTemplate`
+
+Bypass Spring AI’s `MongoDBAtlasVectorStore` and implement the similarity search directly using `MongoTemplate` with Atlas’s `$vectorSearch` operator.
+
+```java
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.aggregation.Aggregation;
+import org.springframework.data.mongodb.core.aggregation.AggregationOperation;
+import org.springframework.ai.document.Document;
+import org.springframework.ai.embedding.EmbeddingModel;
+import java.util.List;
+import java.util.stream.Collectors;
+
+public class ManualVectorSearch {
+
+    private final MongoTemplate mongoTemplate;
+    private final EmbeddingModel embeddingModel;
+
+    public ManualVectorSearch(MongoTemplate mongoTemplate, EmbeddingModel embeddingModel) {
+        this.mongoTemplate = mongoTemplate;
+        this.embeddingModel = embeddingModel;
+    }
+
+    public List<Document> similaritySearch(String query, int topK, double similarityThreshold) {
+        // Generate embedding for the query
+        float[] queryEmbedding = embeddingModel.embed(query);
+
+        // Build the $vectorSearch aggregation pipeline
+        AggregationOperation vectorSearch = Aggregation.stage(new com.mongodb.BasicDBObject("$vectorSearch", 
+            new com.mongodb.BasicDBObject()
+                .append("index", "vector_index")
+                .append("path", "embedding")
+                .append("queryVector", queryEmbedding)
+                .append("numCandidates", topK * 10) // Adjust for better results
+                .append("limit", topK)
+        ));
+
+        AggregationOperation project = Aggregation.stage(new com.mongodb.BasicDBObject("$project", 
+            new com.mongodb.BasicDBObject()
+                .append("content", 1)
+                .append("metadata", 1)
+                .append("score", new com.mongodb.BasicDBObject("$meta", "vectorSearchScore"))
+        ));
+
+        Aggregation aggregation = Aggregation.newAggregation(vectorSearch, project);
+
+        // Execute the aggregation
+        List<com.mongodb.DBObject> results = mongoTemplate.aggregate(aggregation, "default_vector_collection", com.mongodb.DBObject.class)
+                .getMappedResults();
+
+        // Convert to Spring AI Document
+        return results.stream()
+                .filter(result -> (double) result.get("score") >= similarityThreshold)
+                .map(result -> new Document(
+                        (String) result.get("content"),
+                        (java.util.Map<String, Object>) result.get("metadata"),
+                        (float) ((double) result.get("score"))
+                ))
+                .collect(Collectors.toList());
+    }
+}
+```
+
+- **Usage**:
+  ```java
+  @Autowired
+  private MongoTemplate mongoTemplate;
+
+  @Autowired
+  private EmbeddingModel embeddingModel;
+
+  public List<Document> retrieve(String query) {
+      ManualVectorSearch search = new ManualVectorSearch(mongoTemplate, embeddingModel);
+      return search.similaritySearch(query, 5, 0.7);
+  }
+  ```
+
+- **Why It Works**:
+  - Uses your proven `MongoTemplate` directly, avoiding Spring AI’s vector store logic.
+  - Executes the same `$vectorSearch` operation Atlas supports.
+
+- **Requirements**:
+  - Ensure `vector_index` exists on `default_vector_collection` (check Atlas UI or MongoDB Shell).
+  - `embeddingModel.embed()` must match the dimension of your stored embeddings (e.g., 1536 for OpenAI).
+
+#### Option 2: Downgrade or Upgrade Spring AI
+
+- **Downgrade**: Test an earlier version (e.g., `0.8.1`) where this bug might not exist:
+  ```groovy
+  dependencies {
+      implementation 'org.springframework.ai:spring-ai-mongodb-atlas-vector-store:0.8.1'
+  }
+  repositories {
+      maven { url 'https://repo.spring.io/release' }
+  }
+  ```
+
+- **Upgrade**: Try the latest snapshot (e.g., `1.0.0-SNAPSHOT`):
+  ```groovy
+  dependencies {
+      implementation 'org.springframework.ai:spring-ai-mongodb-atlas-vector-store:1.0.0-SNAPSHOT'
+  }
+  repositories {
+      maven { url 'https://repo.spring.io/snapshot' }
+  }
+  ```
+
+- **Process**:
+  - Update `build.gradle`, rebuild, redeploy to EKS, and test the original retrieval code.
+
+#### Option 3: Use a Different Vector Store
+
+Switch to an alternative vector store supported by Spring AI (e.g., in-memory, PostgreSQL, or another MongoDB implementation):
+
+- **In-Memory (SimpleVectorStore)**:
+  ```java
+  @Bean(name = "defaultVectorStore")
+  public VectorStore defaultVectorStore(EmbeddingModel embeddingModel) {
+      return new SimpleVectorStore(embeddingModel);
+  }
+  ```
+  - Pros: Works immediately, no external DB issues.
+  - Cons: In-memory only, loses data on restart, not scalable for EKS.
+
+- **MongoDB Without Atlas-Specific Features**:
+  - Use a generic MongoDB vector store if Spring AI supports it (less likely in `1.0.0-M6`), or implement cosine similarity manually with `MongoTemplate`.
+
+#### Option 4: Patch Spring AI Locally
+
+Fork Spring AI, fix the `MongoDBAtlasVectorStore` class, and use a custom build:
+
+- **Source**: Clone `spring-ai` from GitHub (branch for `1.0.0-M6`).
+- **Fix**: In `MongoDBAtlasVectorStore.java`, ensure `similaritySearch()` uses the injected `MongoTemplate`’s `MongoClient` without overrides.
+- **Build**:
+  ```bash
+  ./gradlew build
+  ./gradlew publishToMavenLocal
+  ```
+- **Use**:
+  ```groovy
+  dependencies {
+      implementation 'org.springframework.ai:spring-ai-mongodb-atlas-vector-store:1.0.0-M6-local' // Adjust version
+  }
+  repositories {
+      mavenLocal()
+  }
+  ```
+
+- **Complexity**: High, but viable if you need a quick fix and can’t wait for an official release.
+
+#### Option 5: Contact Spring AI Team
+
+- **Report Bug**: File an issue on the Spring AI GitHub (`spring-ai/spring-ai`) with:
+  - Your error log.
+  - Code snippet.
+  - Version (`1.0.0-M6`).
+  - Environment (EKS, Atlas).
+- **Workaround**: They might suggest a patched version or configuration tweak.
+
+---
+
+### Recommended Solution
+
+**Option 1: Manual Vector Search with `MongoTemplate`** is the fastest, most reliable fix given your situation:
+- It leverages your working `MongoTemplate`.
+- Avoids Spring AI’s buggy vector search logic.
+- Maintains Atlas’s `$vectorSearch` capabilities.
+
+#### Implementation Example
+
+```java
+@Service
+public class VectorSearchService {
+
+    private final MongoTemplate mongoTemplate;
+    private final EmbeddingModel embeddingModel;
+
+    public VectorSearchService(MongoTemplate mongoTemplate, EmbeddingModel embeddingModel) {
+        this.mongoTemplate = mongoTemplate;
+        this.embeddingModel = embeddingModel;
+    }
+
+    public List<Document> retrieve(String query) {
+        float[] queryEmbedding = embeddingModel.embed(query);
+
+        AggregationOperation vectorSearch = Aggregation.stage(new com.mongodb.BasicDBObject("$vectorSearch", 
+            new com.mongodb.BasicDBObject()
+                .append("index", "vector_index")
+                .append("path", "embedding")
+                .append("queryVector", queryEmbedding)
+                .append("numCandidates", 50)
+                .append("limit", 5)
+        ));
+
+        AggregationOperation project = Aggregation.stage(new com.mongodb.BasicDBObject("$project", 
+            new com.mongodb.BasicDBObject()
+                .append("content", 1)
+                .append("metadata", 1)
+                .append("score", new com.mongodb.BasicDBObject("$meta", "vectorSearchScore"))
+        ));
+
+        Aggregation aggregation = Aggregation.newAggregation(vectorSearch, project);
+
+        List<com.mongodb.DBObject> results = mongoTemplate.aggregate(aggregation, "default_vector_collection", com.mongodb.DBObject.class)
+                .getMappedResults();
+
+        return results.stream()
+                .filter(result -> (double) result.get("score") >= 0.7)
+                .map(result -> new Document(
+                        (String) result.get("content"),
+                        (java.util.Map<String, Object>) result.get("metadata"),
+                        (float) ((double) result.get("score"))
+                ))
+                .collect(Collectors.toList());
+    }
+}
+```
+
+- **Deploy**:
+  - Add to your `FlowConfig` or service class.
+  - Update your flow to call `vectorSearchService.retrieve(query)` instead of `VectorStoreDocumentRetriever`.
+
+---
+
+### Verification
+
+1. **Deploy**:
+   ```bash
+   ./gradlew clean build
+   docker build -t your-app-image:tag .
+   docker push your-app-image:tag
+   kubectl apply -f deployment.yaml
+   ```
+
+2. **Logs**:
+   ```bash
+   kubectl logs -f deployment/your-app
+   ```
+
+3. **Test**:
+   ```
+   curl "http://<external-ip>:8080/generate-prompt?flowIdentifier=simple_flow&userInput=What’s wrong?&sessionId=user123"
+   ```
+
+- **Expected**: No `localhost:28000` error, returns documents with scores >= 0.7.
+
+---
+
+### Next Steps
+
+1. **Try Option 1**: Implement and test the manual vector search.
+2. **Share Results**: Post the logs or any new errors from the manual approach.
+3. **Explore Option 2**: If needed, test a different Spring AI version.
+4. **EKS Check**: Confirm egress to Atlas (though your direct query success suggests this is fine).
+
+This should get you past the `localhost:28000` issue. Let me know how it works!
