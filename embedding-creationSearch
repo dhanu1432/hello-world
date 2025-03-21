@@ -1,0 +1,476 @@
+Great idea—creating a new MongoDB collection and embeddings with Java/Spring AI `1.0.0-M6`, then searching it with dot product similarity, will help isolate whether the issue stems from the existing collection (created by Python) or the Java environment. We’ll use the `text-embedding-3-small` model from OpenAI (1536 dimensions) and ensure both creation and search happen within Java, targeting a new collection in your MongoDB Atlas database (`teamA_db`). This approach bypasses potential incompatibilities from the Python-created collection and lets us test a clean slate.
+
+Here’s the complete code to:
+1. Create embeddings and store them in a new collection (`java_vector_team_a`).
+2. Search the same collection using dot product similarity.
+3. Validate the results.
+
+---
+
+### Assumptions
+
+- **MongoDB Atlas**: Your `teamA_db` database is accessible via `mongodb+srv://teamA_user:teamA_pass@xxxxx.mongodb.net/teamA_db?retryWrites=true&w=majority`.
+- **Collection**: New collection named `java_vector_team_a` (to avoid conflicts with the Python-created `vector_team_a`).
+- **Embedding Model**: OpenAI’s `text-embedding-3-small` (1536 dimensions).
+- **Similarity**: Dot product (we’ll configure this in the vector index).
+- **Spring AI**: `1.0.0-M6`, Spring Boot `3.3.7`, MongoDB driver `5.2.1`.
+
+---
+
+### Step 1: Gradle Setup
+
+Ensure your `build.gradle` aligns with Spring AI and the OpenAI embedding model:
+
+```groovy
+plugins {
+    id 'org.springframework.boot' version '3.3.7'
+    id 'io.spring.dependency-management' version '1.1.6'
+    id 'java'
+}
+
+group = 'com.example'
+version = '0.0.1-SNAPSHOT'
+sourceCompatibility = '17'
+
+repositories {
+    mavenCentral()
+    maven { url 'https://repo.spring.io/milestone' }
+}
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    
+    // MongoDB with explicit driver version
+    implementation ('org.springframework.boot:spring-boot-starter-data-mongodb') {
+        exclude group: 'org.mongodb', module: 'mongodb-driver-sync'
+    }
+    implementation 'org.mongodb:mongodb-driver-sync:5.2.1'
+    
+    // Spring AI with OpenAI
+    implementation 'org.springframework.ai:spring-ai-openai-spring-boot-starter:1.0.0-M6'
+    implementation 'org.springframework.ai:spring-ai-mongodb-atlas-vector-store:1.0.0-M6'
+    
+    implementation 'mysql:mysql-connector-java:8.0.33'
+}
+
+dependencyManagement {
+    imports {
+        mavenBom 'org.springframework.ai:spring-ai-bom:1.0.0-M6'
+    }
+}
+```
+
+---
+
+### Step 2: Configuration and Embedding Creation
+
+We’ll create a service to generate embeddings and store them in the new collection.
+
+#### `FlowConfig.java`
+
+```java
+import com.mongodb.client.MongoClient;
+import com.mongodb.client.MongoClients;
+import org.springframework.ai.embedding.EmbeddingModel;
+import org.springframework.ai.openai.OpenAiEmbeddingModel;
+import org.springframework.ai.openai.api.OpenAiApi;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.data.mongodb.core.MongoTemplate;
+
+@Configuration
+public class FlowConfig {
+
+    @Value("${spring.data.mongodb.uri}")
+    private String mongoUri;
+
+    @Value("${spring.data.mongodb.database}")
+    private String mongoDatabase;
+
+    @Value("${spring.ai.openai.api-key}")
+    private String openAiApiKey;
+
+    @Bean
+    public MongoClient mongoClient() {
+        MongoClient client = MongoClients.create(mongoUri);
+        System.out.println("MongoClient Hosts: " + client.getClusterDescription().getClusterSettings().getHosts());
+        return client;
+    }
+
+    @Bean
+    public MongoTemplate mongoTemplate(MongoClient mongoClient) {
+        return new MongoTemplate(mongoClient, mongoDatabase);
+    }
+
+    @Bean
+    public EmbeddingModel embeddingModel() {
+        OpenAiApi openAiApi = new OpenAiApi(openAiApiKey);
+        return new OpenAiEmbeddingModel(openAiApi, "text-embedding-3-small", 1536);
+    }
+
+    @Bean
+    public VectorCreationService vectorCreationService(MongoTemplate mongoTemplate, EmbeddingModel embeddingModel) {
+        return new VectorCreationService(mongoTemplate, embeddingModel);
+    }
+
+    @Bean
+    public VectorSearchService vectorSearchService(MongoClient mongoClient, EmbeddingModel embeddingModel) {
+        return new VectorSearchService(mongoClient, embeddingModel);
+    }
+}
+```
+
+#### `VectorCreationService.java`
+
+This service creates embeddings for sample text and stores them in `java_vector_team_a`.
+
+```java
+import org.springframework.ai.document.Document;
+import org.springframework.ai.embedding.EmbeddingModel;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+public class VectorCreationService {
+
+    private final MongoTemplate mongoTemplate;
+    private final EmbeddingModel embeddingModel;
+    private final String collectionName = "java_vector_team_a";
+
+    public VectorCreationService(MongoTemplate mongoTemplate, EmbeddingModel embeddingModel) {
+        this.mongoTemplate = mongoTemplate;
+        this.embeddingModel = embeddingModel;
+    }
+
+    public void createAndStoreEmbeddings() {
+        // Sample texts
+        List<String> sampleTexts = Arrays.asList(
+            "The quick brown fox jumps over the lazy dog.",
+            "A journey of a thousand miles begins with a single step.",
+            "To be or not to be, that is the question.",
+            "All that glitters is not gold.",
+            "The early bird catches the worm."
+        );
+
+        // Drop existing collection to start fresh
+        mongoTemplate.dropCollection(collectionName);
+
+        // Create and store embeddings
+        for (String text : sampleTexts) {
+            float[] embedding = embeddingModel.embed(text);
+            Map<String, Object> metadata = new HashMap<>();
+            metadata.put("source", "sample_text");
+
+            Document document = new Document(text, metadata);
+            org.bson.Document bsonDoc = new org.bson.Document()
+                    .append("text", text)
+                    .append("embedding", embedding)
+                    .append("metadata", metadata);
+
+            mongoTemplate.insert(bsonDoc, collectionName);
+            System.out.println("Inserted: " + text);
+        }
+
+        // Create vector index with dot product similarity
+        createVectorIndex();
+    }
+
+    private void createVectorIndex() {
+        org.bson.Document indexCommand = new org.bson.Document()
+                .append("createSearchIndexes", collectionName)
+                .append("indexes", Arrays.asList(
+                        new org.bson.Document()
+                                .append("name", "vector_index")
+                                .append("definition", new org.bson.Document()
+                                        .append("fields", Arrays.asList(
+                                                new org.bson.Document()
+                                                        .append("type", "vector")
+                                                        .append("path", "embedding")
+                                                        .append("numDimensions", 1536)
+                                                        .append("similarity", "dotProduct")
+                                        ))
+                                )
+                ));
+
+        mongoTemplate.getDb().runCommand(indexCommand);
+        System.out.println("Vector index created with dot product similarity.");
+    }
+}
+```
+
+- **Notes**:
+  - Drops and recreates `java_vector_team_a` for a clean test.
+  - Uses `text-embedding-3-small` to generate 1536-dimension embeddings.
+  - Creates a vector index with `dotProduct` similarity.
+
+---
+
+### Step 3: Vector Search Service
+
+Search the new collection with dot product similarity.
+
+#### `VectorSearchService.java`
+
+```java
+import com.mongodb.client.MongoClient;
+import com.mongodb.client.MongoCollection;
+import org.springframework.ai.document.Document;
+import org.springframework.ai.embedding.EmbeddingModel;
+import org.bson.Document;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+public class VectorSearchService {
+
+    private final MongoClient mongoClient;
+    private final EmbeddingModel embeddingModel;
+    private final String collectionName = "java_vector_team_a";
+
+    public VectorSearchService(MongoClient mongoClient, EmbeddingModel embeddingModel) {
+        this.mongoClient = mongoClient;
+        this.embeddingModel = embeddingModel;
+    }
+
+    public List<Document> retrieve(String query) {
+        System.out.println("Hosts Before Search: " + mongoClient.getClusterDescription().getClusterSettings().getHosts());
+
+        MongoCollection<org.bson.Document> collection = mongoClient.getDatabase("teamA_db")
+                .getCollection(collectionName);
+
+        float[] queryEmbedding = embeddingModel.embed(query);
+
+        Document vectorSearch = new Document("$vectorSearch", 
+            new Document()
+                .append("index", "vector_index")
+                .append("path", "embedding")
+                .append("queryVector", queryEmbedding)
+                .append("numCandidates", 10)
+                .append("limit", 5)
+        );
+
+        Document project = new Document("$project", 
+            new Document()
+                .append("_id", 0)
+                .append("text", 1)
+                .append("metadata", 1)
+                .append("score", new Document("$meta", "vectorSearchScore"))
+        );
+
+        try {
+            List<org.bson.Document> results = collection.aggregate(Arrays.asList(vectorSearch, project))
+                    .into(new ArrayList<>());
+            System.out.println("Search Successful: " + results.size());
+            return results.stream()
+                    .filter(result -> result.getDouble("score") >= 0.7) // Adjust threshold as needed
+                    .map(result -> {
+                        Map<String, Object> metadata = (Map<String, Object>) result.get("metadata");
+                        if (metadata == null) {
+                            metadata = new HashMap<>();
+                        }
+                        metadata.put("similarityScore", result.get("score"));
+                        return new Document(result.getString("text"), metadata);
+                    })
+                    .collect(Collectors.toList());
+        } catch (Exception e) {
+            System.err.println("Search Failed: " + e.getMessage());
+            e.printStackTrace();
+            throw e;
+        }
+    }
+}
+```
+
+---
+
+### Step 4: Controller for Testing
+
+#### `VectorController.java`
+
+```java
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.ai.document.Document;
+import java.util.List;
+
+@RestController
+public class VectorController {
+
+    @Autowired
+    private VectorCreationService vectorCreationService;
+
+    @Autowired
+    private VectorSearchService vectorSearchService;
+
+    @GetMapping("/create-embeddings")
+    public String createEmbeddings() {
+        vectorCreationService.createAndStoreEmbeddings();
+        return "Embeddings created and stored in java_vector_team_a";
+    }
+
+    @GetMapping("/search")
+    public List<Document> search(@RequestParam String query) {
+        return vectorSearchService.retrieve(query);
+    }
+}
+```
+
+---
+
+### Step 5: Application Properties
+
+#### `application.properties`
+
+```properties
+spring.data.mongodb.uri=mongodb+srv://teamA_user:teamA_pass@xxxxx.mongodb.net/teamA_db?retryWrites=true&w=majority
+spring.data.mongodb.database=teamA_db
+spring.ai.openai.api-key=your-openai-api-key
+logging.level.com.example=DEBUG
+```
+
+---
+
+### Step 6: Deployment to EKS
+
+1. **Build**:
+   ```bash
+   ./gradlew clean build
+   docker build -t your-app-image:tag .
+   docker push your-app-image:tag
+   ```
+
+2. **Deploy**:
+   ```yaml
+   apiVersion: apps/v1
+   kind: Deployment
+   metadata:
+     name: your-app
+   spec:
+     replicas: 1
+     selector:
+       matchLabels:
+         app: your-app
+     template:
+       metadata:
+         labels:
+           app: your-app
+       spec:
+         containers:
+         - name: your-app
+           image: your-app-image:tag
+           env:
+           - name: SPRING_DATA_MONGODB_URI
+             value: "mongodb+srv://teamA_user:teamA_pass@xxxxx.mongodb.net/teamA_db?retryWrites=true&w=majority"
+           - name: SPRING_DATA_MONGODB_DATABASE
+             value: "teamA_db"
+           - name: SPRING_AI_OPENAI_API_KEY
+             value: "your-openai-api-key"
+   ```
+
+3. **Apply**:
+   ```bash
+   kubectl apply -f deployment.yaml
+   kubectl expose deployment your-app --type=LoadBalancer --port=8080
+   kubectl get svc your-app -o wide # Get external IP
+   ```
+
+---
+
+### Step 7: Test and Validate
+
+1. **Create Embeddings**:
+   ```
+   curl "http://<external-ip>:8080/create-embeddings"
+   ```
+   - **Expected Logs**:
+     ```
+     MongoClient Hosts: [cluster0-shard-00-00.abc123.mongodb.net:27017, ...]
+     Inserted: The quick brown fox jumps over the lazy dog.
+     ...
+     Vector index created with dot product similarity.
+     ```
+
+2. **Search**:
+   ```
+   curl "http://<external-ip>:8080/search?query=The fox jumps high"
+   ```
+   - **Expected Logs**:
+     ```
+     Hosts Before Search: [cluster0-shard-00-00.abc123.mongodb.net:27017, ...]
+     Search Successful: 5
+     ```
+   - **Expected Response**:
+     ```json
+     [
+         {"content": "The quick brown fox jumps over the lazy dog.", "metadata": {"source": "sample_text", "similarityScore": 0.95}},
+         ...
+     ]
+     ```
+
+3. **Validate in Atlas**:
+   - Check `java_vector_team_a` in Atlas UI or MongoDB Shell:
+     ```javascript
+     db.java_vector_team_a.find()
+     db.java_vector_team_a.getSearchIndexes()
+     ```
+
+---
+
+### Why This Should Work
+
+- **Fresh Collection**: `java_vector_team_a` is created and populated by Java, avoiding Python/Java compatibility issues.
+- **Controlled Embedding**: Uses `text-embedding-3-small` (1536 dimensions) directly in Spring AI.
+- **Dot Product Similarity**: Explicitly set in the vector index.
+- **Simplified Client**: Uses `MongoClient` directly, bypassing potential Spring AI bugs.
+
+---
+
+### If `localhost:28000` Persists
+
+1. **Local Test**:
+   - Run `VectorCreationService.createAndStoreEmbeddings()` and `VectorSearchService.retrieve()` locally first.
+
+2. **Networking**:
+   - Test EKS connectivity:
+     ```bash
+     kubectl exec -it <pod-name> -- telnet xxxxx.mongodb.net 27017
+     ```
+   - Use SSH tunnel if needed:
+     ```yaml
+     spec:
+       containers:
+       - name: ssh-tunnel
+         image: alpine:latest
+         command: ["/bin/sh", "-c"]
+         args:
+         - "apk add openssh-client; ssh -L 27017:xxxxx.mongodb.net:27017 user@bastion-host -N"
+     ```
+
+3. **Driver**:
+   - Test `5.1.0`:
+     ```groovy
+     implementation 'org.mongodb:mongodb-driver-sync:5.1.0'
+     ```
+
+---
+
+### Next Steps
+
+1. **Deploy and Test**:
+   - Run the creation and search endpoints.
+
+2. **Share Logs**:
+   - Post `kubectl logs` output, especially any errors.
+
+3. **Confirm Collection**:
+   - Verify `java_vector_team_a` is correct or adjust if needed.
+
+This should give us a clean test case to resolve the `localhost:28000` issue. Let me know how it goes!
