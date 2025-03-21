@@ -1,0 +1,211 @@
+You’re absolutely right—my apologies for the oversight. In Spring AI `1.0.0-M6`, the `Document` class (`org.springframework.ai.document.Document`) does not have a constructor that accepts a similarity score as a parameter. The available constructors typically take `content` (String) and optionally `metadata` (Map), but the score is not directly supported in the constructor. This is a limitation in the current API design, as the score is usually handled internally by the vector store and retriever but not exposed in the `Document` object itself.
+
+Given this, we’ll adjust the manual vector search implementation to work with the available `Document` constructors and still meet your needs for retrieving documents with a similarity threshold. Here’s how we can adapt the solution.
+
+---
+
+### Adjusted Manual Vector Search
+
+We’ll use the `Document` constructor that takes `content` and `metadata`, and store the similarity score in the `metadata` map if needed for downstream processing. Alternatively, we can filter results based on the score before creating `Document` objects.
+
+#### Updated Code
+
+```java
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.aggregation.Aggregation;
+import org.springframework.data.mongodb.core.aggregation.AggregationOperation;
+import org.springframework.ai.document.Document;
+import org.springframework.ai.embedding.EmbeddingModel;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+@Service
+public class VectorSearchService {
+
+    private final MongoTemplate mongoTemplate;
+    private final EmbeddingModel embeddingModel;
+
+    public VectorSearchService(MongoTemplate mongoTemplate, EmbeddingModel embeddingModel) {
+        this.mongoTemplate = mongoTemplate;
+        this.embeddingModel = embeddingModel;
+    }
+
+    public List<Document> retrieve(String query) {
+        // Generate embedding for the query
+        float[] queryEmbedding = embeddingModel.embed(query);
+
+        // Build the $vectorSearch aggregation pipeline
+        AggregationOperation vectorSearch = Aggregation.stage(new com.mongodb.BasicDBObject("$vectorSearch", 
+            new com.mongodb.BasicDBObject()
+                .append("index", "vector_index")
+                .append("path", "embedding")
+                .append("queryVector", queryEmbedding)
+                .append("numCandidates", 50) // Adjust for better recall
+                .append("limit", 5)
+        ));
+
+        AggregationOperation project = Aggregation.stage(new com.mongodb.BasicDBObject("$project", 
+            new com.mongodb.BasicDBObject()
+                .append("content", 1)
+                .append("metadata", 1)
+                .append("score", new com.mongodb.BasicDBObject("$meta", "vectorSearchScore"))
+        ));
+
+        Aggregation aggregation = Aggregation.newAggregation(vectorSearch, project);
+
+        // Execute the aggregation
+        List<com.mongodb.DBObject> results = mongoTemplate.aggregate(aggregation, "default_vector_collection", com.mongodb.DBObject.class)
+                .getMappedResults();
+
+        // Convert to Spring AI Documents, filtering by similarity threshold
+        return results.stream()
+                .filter(result -> (double) result.get("score") >= 0.7)
+                .map(result -> {
+                    Map<String, Object> metadata = (Map<String, Object>) result.get("metadata");
+                    if (metadata == null) {
+                        metadata = new java.util.HashMap<>();
+                    }
+                    metadata.put("similarityScore", result.get("score")); // Store score in metadata
+                    return new Document(
+                            (String) result.get("content"),
+                            metadata
+                    );
+                })
+                .collect(Collectors.toList());
+    }
+}
+```
+
+- **Key Changes**:
+  - Used `Document(String content, Map<String, Object> metadata)` constructor.
+  - Added the `score` to the `metadata` map under `"similarityScore"` for reference.
+  - Applied the `0.7` similarity threshold in the stream filter before creating `Document` objects.
+
+- **Usage**:
+  ```java
+  @Autowired
+  private VectorSearchService vectorSearchService;
+
+  public void someMethod(String query) {
+      List<Document> docs = vectorSearchService.retrieve(query);
+      System.out.println("Retrieved Docs: " + docs.size());
+      docs.forEach(doc -> {
+          System.out.println("Content: " + doc.getContent());
+          System.out.println("Score: " + doc.getMetadata().get("similarityScore"));
+      });
+  }
+  ```
+
+- **Dependencies**:
+  - Ensure `MongoTemplate` and `EmbeddingModel` are wired in your `FlowConfig`:
+    ```java
+    @Bean
+    public VectorSearchService vectorSearchService(MongoTemplate mongoTemplate, EmbeddingModel embeddingModel) {
+        return new VectorSearchService(mongoTemplate, embeddingModel);
+    }
+    ```
+
+---
+
+### Why This Works
+
+- **Bypasses Spring AI Bug**: By using `MongoTemplate` directly, you avoid the `localhost:28000` issue in `MongoDBAtlasVectorStore.similaritySearch()`.
+- **Matches Your Requirements**: Retrieves top 5 documents with a similarity score >= 0.7, mimicking `VectorStoreDocumentRetriever`.
+- **Compatible with `1.0.0-M6`**: Uses the available `Document` constructor and stores the score in `metadata`.
+
+---
+
+### Verification
+
+1. **Deploy**:
+   - Add the `VectorSearchService` to your code.
+   - Update your flow to use `vectorSearchService.retrieve(query)` instead of `VectorStoreDocumentRetriever`.
+   - Build and deploy to EKS:
+     ```bash
+     ./gradlew clean build
+     docker build -t your-app-image:tag .
+     docker push your-app-image:tag
+     kubectl apply -f deployment.yaml
+     ```
+
+2. **Logs**:
+   - Add debug logging:
+     ```properties
+     logging.level.com.example=DEBUG
+     ```
+   - Check:
+     ```bash
+     kubectl logs -f deployment/your-app
+     ```
+
+3. **Test**:
+   ```
+   curl "http://<external-ip>:8080/generate-prompt?flowIdentifier=simple_flow&userInput=What’s wrong?&sessionId=user123"
+   ```
+
+- **Expected Output**:
+  ```
+  DEBUG [com.example] - Retrieved Docs: <number>
+  DEBUG [com.example] - Content: <document content>
+  DEBUG [com.example] - Score: <score >= 0.7>
+  ```
+
+---
+
+### Handling the Score
+
+Since `Document` doesn’t store the score natively:
+- **Metadata Approach**: As shown, store it in `metadata` under `"similarityScore"`. Access it via `doc.getMetadata().get("similarityScore")`.
+- **Custom Wrapper**: If you need the score more explicitly, create a wrapper class:
+  ```java
+  public class ScoredDocument {
+      private final Document document;
+      private final double score;
+
+      public ScoredDocument(Document document, double score) {
+          this.document = document;
+          this.score = score;
+      }
+
+      public Document getDocument() { return document; }
+      public double getScore() { return score; }
+  }
+
+  public List<ScoredDocument> retrieve(String query) {
+      // ... same aggregation logic ...
+      return results.stream()
+              .filter(result -> (double) result.get("score") >= 0.7)
+              .map(result -> new ScoredDocument(
+                      new Document((String) result.get("content"), (Map<String, Object>) result.get("metadata")),
+                      (double) result.get("score")
+              ))
+              .collect(Collectors.toList());
+  }
+  ```
+
+---
+
+### Alternative Considerations
+
+If the manual approach doesn’t fully meet your needs:
+- **Spring AI Upgrade**: Test `1.0.0-SNAPSHOT` to see if the bug is fixed:
+  ```groovy
+  repositories {
+      maven { url 'https://repo.spring.io/snapshot' }
+  }
+  dependencies {
+      implementation 'org.springframework.ai:spring-ai-mongodb-atlas-vector-store:1.0.0-SNAPSHOT'
+  }
+  ```
+- **Fallback to Older Version**: Try `0.8.1` if snapshots are unstable.
+
+---
+
+### Next Steps
+
+1. **Implement and Test**: Use the updated `VectorSearchService` with metadata.
+2. **Share Results**: Post logs or any issues from the deployment.
+3. **Score Access**: Let me know if you need the `ScoredDocument` wrapper instead.
+
+This should resolve the issue while working within Spring AI `1.0.0-M6`’s constraints. Let me know how it goes!
