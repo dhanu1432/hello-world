@@ -1,0 +1,328 @@
+Got it—let’s use Spring AI `1.0.0-M6` exclusively to create and retrieve embeddings, avoiding direct MongoDB libraries like `MongoTemplate` or `MongoClient`. We’ll leverage `MongoDBAtlasVectorStore` for both storing embeddings and performing the vector search with dot product similarity, using the `text-embedding-3-small` model (1536 dimensions). This ensures everything stays within Spring AI’s abstraction, aligning creation and retrieval in Java, and targets a new collection (`java_vector_team_a`) to avoid issues from the Python-created collection.
+
+Here’s the updated code:
+
+---
+
+### Gradle Setup
+
+```groovy
+plugins {
+    id 'org.springframework.boot' version '3.3.7'
+    id 'io.spring.dependency-management' version '1.1.6'
+    id 'java'
+}
+
+group = 'com.example'
+version = '0.0.1-SNAPSHOT'
+sourceCompatibility = '17'
+
+repositories {
+    mavenCentral()
+    maven { url 'https://repo.spring.io/milestone' }
+}
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    implementation 'org.springframework.boot:spring-boot-starter-data-mongodb'
+    implementation 'org.springframework.ai:spring-ai-openai-spring-boot-starter:1.0.0-M6'
+    implementation 'org.springframework.ai:spring-ai-mongodb-atlas-vector-store:1.0.0-M6'
+    implementation 'mysql:mysql-connector-java:8.0.33'
+}
+
+dependencyManagement {
+    imports {
+        mavenBom 'org.springframework.ai:spring-ai-bom:1.0.0-M6'
+    }
+}
+```
+
+---
+
+### Configuration and Services
+
+#### `FlowConfig.java`
+
+```java
+import org.springframework.ai.embedding.EmbeddingModel;
+import org.springframework.ai.openai.OpenAiEmbeddingModel;
+import org.springframework.ai.openai.api.OpenAiApi;
+import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.ai.vectorstore.mongodb.MongoDBAtlasVectorStore;
+import org.springframework.ai.vectorstore.mongodb.MongoDBAtlasVectorStoreConfig;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class FlowConfig {
+
+    @Value("${spring.data.mongodb.uri}")
+    private String mongoUri;
+
+    @Value("${spring.data.mongodb.database}")
+    private String mongoDatabase;
+
+    @Value("${spring.ai.openai.api-key}")
+    private String openAiApiKey;
+
+    @Bean
+    public EmbeddingModel embeddingModel() {
+        OpenAiApi openAiApi = new OpenAiApi(openAiApiKey);
+        return new OpenAiEmbeddingModel(openAiApi, "text-embedding-3-small", 1536);
+    }
+
+    @Bean
+    public VectorStore vectorStore(EmbeddingModel embeddingModel) {
+        MongoDBAtlasVectorStoreConfig config = MongoDBAtlasVectorStoreConfig.builder()
+                .withMongoURI(mongoUri)
+                .withDatabaseName(mongoDatabase)
+                .withCollectionName("java_vector_team_a")
+                .withVectorIndexName("vector_index")
+                .build();
+        return new MongoDBAtlasVectorStore(config, embeddingModel);
+    }
+
+    @Bean
+    public VectorCreationService vectorCreationService(VectorStore vectorStore) {
+        return new VectorCreationService(vectorStore);
+    }
+
+    @Bean
+    public VectorSearchService vectorSearchService(VectorStore vectorStore) {
+        return new VectorSearchService(vectorStore);
+    }
+}
+```
+
+- **Notes**:
+  - `MongoDBAtlasVectorStore` handles all MongoDB interactions internally.
+  - Configures `java_vector_team_a` as the collection and `vector_index` as the index name.
+
+#### `VectorCreationService.java`
+
+Uses Spring AI to create and store embeddings:
+
+```java
+import org.springframework.ai.document.Document;
+import org.springframework.ai.vectorstore.VectorStore;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+public class VectorCreationService {
+
+    private final VectorStore vectorStore;
+
+    public VectorCreationService(VectorStore vectorStore) {
+        this.vectorStore = vectorStore;
+    }
+
+    public void createAndStoreEmbeddings() {
+        List<String> sampleTexts = Arrays.asList(
+            "The quick brown fox jumps over the lazy dog.",
+            "A journey of a thousand miles begins with a single step.",
+            "To be or not to be, that is the question.",
+            "All that glitters is not gold.",
+            "The early bird catches the worm."
+        );
+
+        // Clear existing data (Spring AI doesn’t provide a direct drop, so we rely on manual cleanup if needed)
+        List<Document> documents = sampleTexts.stream()
+                .map(text -> {
+                    Map<String, Object> metadata = new HashMap<>();
+                    metadata.put("source", "sample_text");
+                    return new Document(text, metadata);
+                })
+                .toList();
+
+        vectorStore.add(documents);
+        System.out.println("Embeddings created and stored in java_vector_team_a");
+
+        // Create vector index manually via MongoDB Shell or Atlas UI (see below)
+    }
+}
+```
+
+- **Notes**:
+  - `vectorStore.add()` generates embeddings with `text-embedding-3-small` and stores them.
+  - Spring AI doesn’t directly manage index creation in `1.0.0-M6`, so we’ll create it manually once.
+
+#### `VectorSearchService.java`
+
+Uses Spring AI for retrieval:
+
+```java
+import org.springframework.ai.document.Document;
+import org.springframework.ai.vectorstore.VectorStore;
+import java.util.List;
+
+public class VectorSearchService {
+
+    private final VectorStore vectorStore;
+
+    public VectorSearchService(VectorStore vectorStore) {
+        this.vectorStore = vectorStore;
+    }
+
+    public List<Document> retrieve(String query) {
+        try {
+            List<Document> results = vectorStore.similaritySearch(query, 5); // Top 5 results
+            System.out.println("Search Successful: " + results.size());
+            return results.stream()
+                    .filter(doc -> {
+                        // Similarity score isn’t directly exposed; assume metadata or filter manually in Atlas
+                        return true; // Adjust if score threshold needed
+                    })
+                    .toList();
+        } catch (Exception e) {
+            System.err.println("Search Failed: " + e.getMessage());
+            e.printStackTrace();
+            throw e;
+        }
+    }
+}
+```
+
+- **Notes**:
+  - `similaritySearch(query, k)` performs the vector search.
+  - Spring AI `1.0.0-M6` doesn’t expose the similarity score directly in `Document`, so we’ll rely on Atlas’s ordering (highest dot product first).
+
+#### `VectorController.java`
+
+```java
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.ai.document.Document;
+import java.util.List;
+
+@RestController
+public class VectorController {
+
+    @Autowired
+    private VectorCreationService vectorCreationService;
+
+    @Autowired
+    private VectorSearchService vectorSearchService;
+
+    @GetMapping("/create-embeddings")
+    public String createEmbeddings() {
+        vectorCreationService.createAndStoreEmbeddings();
+        return "Embeddings created and stored in java_vector_team_a";
+    }
+
+    @GetMapping("/search")
+    public List<Document> search(@RequestParam String query) {
+        return vectorSearchService.retrieve(query);
+    }
+}
+```
+
+---
+
+### Application Properties
+
+#### `application.properties`
+
+```properties
+spring.data.mongodb.uri=mongodb+srv://teamA_user:teamA_pass@xxxxx.mongodb.net/teamA_db?retryWrites=true&w=majority
+spring.data.mongodb.database=teamA_db
+spring.ai.openai.api-key=your-openai-api-key
+logging.level.org.springframework.ai=DEBUG
+```
+
+---
+
+### Create Vector Index (Manual Step)
+
+Spring AI `1.0.0-M6` doesn’t auto-create the vector index, so run this in MongoDB Shell or Atlas UI:
+
+```javascript
+db.java_vector_team_a.createSearchIndex({
+    "name": "vector_index",
+    "definition": {
+        "fields": [
+            {
+                "type": "vector",
+                "path": "embedding",
+                "numDimensions": 1536,
+                "similarity": "dotProduct"
+            }
+        ]
+    }
+})
+```
+
+- Run this **after** creating embeddings the first time, as the collection must exist.
+
+---
+
+### Deployment to EKS
+
+1. **Build**:
+   ```bash
+   ./gradlew clean build
+   docker build -t your-app-image:tag .
+   docker push your-app-image:tag
+   ```
+
+2. **Deploy**:
+   ```yaml
+   apiVersion: apps/v1
+   kind: Deployment
+   metadata:
+     name: your-app
+   spec:
+     replicas: 1
+     selector:
+       matchLabels:
+         app: your-app
+     template:
+       metadata:
+         labels:
+           app: your-app
+       spec:
+         containers:
+         - name: your-app
+           image: your-app-image:tag
+           env:
+           - name: SPRING_DATA_MONGODB_URI
+             value: "mongodb+srv://teamA_user:teamA_pass@xxxxx.mongodb.net/teamA_db?retryWrites=true&w=majority"
+           - name: SPRING_DATA_MONGODB_DATABASE
+             value: "teamA_db"
+           - name: SPRING_AI_OPENAI_API_KEY
+             value: "your-openai-api-key"
+   ```
+
+3. **Apply**:
+   ```bash
+   kubectl apply -f deployment.yaml
+   kubectl expose deployment your-app --type=LoadBalancer --port=8080
+   kubectl get svc your-app -o wide # Get external IP
+   ```
+
+---
+
+### Testing
+
+1. **Create Embeddings**:
+   ```
+   curl "http://<external-ip>:8080/create-embeddings"
+   ```
+   - **Logs**:
+     ```
+     DEBUG o.s.ai.vectorstore.mongodb - Adding documents to MongoDB Atlas Vector Store
+     Embeddings created and stored in java_vector_team_a
+     ```
+
+2. **Create Index**:
+   - Run the MongoDB Shell command above to create `vector_index`.
+
+3. **Search**:
+   ```
+   curl "http://<external-ip>:8080/search?query=The fox jumps high"
+  
