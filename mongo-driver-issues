@@ -1,0 +1,313 @@
+Thanks for providing the dependency details. This is a critical piece of information: your project has a version conflict between the MongoDB driver versions pulled in by Spring Boot `3.3.7` and Spring AI `1.0.0-M6`. Specifically:
+
+- **Spring Boot `3.3.7`**: Brings in `mongodb-driver-sync:5.0.1` (via `spring-boot-starter-data-mongodb`).
+- **Spring AI `1.0.0-M6`**: Brings in `mongodb-driver-sync:5.2.1` (via `spring-ai-mongodb-atlas-vector-store`).
+
+This conflict likely explains the `Error connecting to localhost:28000 ... Connection refused` during `$vectorSearch` aggregation, even in your manual implementation with `MongoTemplate`. The mismatch could cause unpredictable behavior in how the MongoDB driver interacts with Atlas, especially for advanced features like vector search. Let’s resolve this and get your vector search working in your AWS EKS environment.
+
+---
+
+### Why the Version Conflict Causes Issues
+
+1. **Driver Incompatibility**:
+   - `5.0.1` (Spring Boot) and `5.2.1` (Spring AI) have different internal implementations. Spring AI’s `$vectorSearch` logic might rely on features or bug fixes in `5.2.1`, while Spring Boot’s `MongoTemplate` uses `5.0.1`, leading to a runtime mismatch.
+   - The `localhost:28000` error suggests the driver is failing to resolve Atlas’s vector search endpoint, possibly due to this inconsistency.
+
+2. **Classloading in EKS**:
+   - In your EKS pod, multiple driver versions could result in classpath conflicts, where the wrong version is loaded for `$vectorSearch`, causing it to misroute to `localhost:28000`.
+
+3. **Vector Search Sensitivity**:
+   - `$vectorSearch` is an Atlas-specific feature that might require a newer driver version (e.g., `5.2.1`) for proper execution, while standard queries work fine with `5.0.1`.
+
+---
+
+### Fixing the Version Conflict
+
+We’ll align the MongoDB driver version across Spring Boot and Spring AI to `5.2.1` (Spring AI’s version), as it’s newer and likely required for `$vectorSearch`. Then, we’ll retest your manual vector search.
+
+#### Step 1: Update `build.gradle`
+
+Override Spring Boot’s default MongoDB driver version:
+
+```groovy
+plugins {
+    id 'org.springframework.boot' version '3.3.7'
+    id 'io.spring.dependency-management' version '1.1.6'
+    id 'java'
+}
+
+group = 'com.example'
+version = '0.0.1-SNAPSHOT'
+sourceCompatibility = '17'
+
+repositories {
+    mavenCentral()
+    maven { url 'https://repo.spring.io/milestone' }
+}
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    
+    // Exclude Spring Boot’s default MongoDB driver
+    implementation ('org.springframework.boot:spring-boot-starter-data-mongodb') {
+        exclude group: 'org.mongodb', module: 'mongodb-driver-sync'
+    }
+    
+    // Use Spring AI’s driver version
+    implementation 'org.mongodb:mongodb-driver-sync:5.2.1'
+    
+    implementation 'org.springframework.ai:spring-ai-openai-spring-boot-starter:1.0.0-M6'
+    implementation 'org.springframework.ai:spring-ai-mongodb-atlas-vector-store:1.0.0-M6'
+    
+    implementation 'mysql:mysql-connector-java:8.0.33'
+}
+
+dependencyManagement {
+    imports {
+        mavenBom 'org.springframework.ai:spring-ai-bom:1.0.0-M6'
+    }
+}
+```
+
+- **Changes**:
+  - Excluded `mongodb-driver-sync` from `spring-boot-starter-data-mongodb`.
+  - Explicitly added `mongodb-driver-sync:5.2.1` to align with Spring AI.
+
+- **Verify**:
+  ```bash
+  ./gradlew dependencies > deps.txt
+  ```
+  Check `deps.txt` for `mongodb-driver-sync`. It should only show `5.2.1`.
+
+#### Step 2: Refined Manual Vector Search
+
+Retest with the unified driver version:
+
+```java
+@Service
+public class VectorSearchService {
+
+    private final MongoTemplate mongoTemplate;
+    private final EmbeddingModel embeddingModel;
+
+    public VectorSearchService(MongoTemplate mongoTemplate, EmbeddingModel embeddingModel) {
+        this.mongoTemplate = mongoTemplate;
+        this.embeddingModel = embeddingModel;
+    }
+
+    public List<Document> retrieve(String query) {
+        System.out.println("Hosts Before Aggregation: " + mongoTemplate.getDb().getMongoClient().getAllAddress());
+        
+        // Test simple query
+        Document testDoc = mongoTemplate.findOne(new org.springframework.data.mongodb.core.query.Query(), Document.class, "vector_team_a");
+        System.out.println("Test Query Result: " + (testDoc != null ? testDoc.toJson() : "null"));
+
+        float[] queryEmbedding = embeddingModel.embed(query);
+
+        AggregationOperation vectorSearch = Aggregation.stage(new com.mongodb.BasicDBObject("$vectorSearch", 
+            new com.mongodb.BasicDBObject()
+                .append("index", "vector_index")
+                .append("path", "embedding")
+                .append("queryVector", queryEmbedding)
+                .append("numCandidates", 10)
+                .append("limit", 5)
+        ));
+
+        AggregationOperation project = Aggregation.stage(new com.mongodb.BasicDBObject("$project", 
+            new com.mongodb.BasicDBObject()
+                .append("_id", 0)
+                .append("text", 1)
+                .append("metadata", 1)
+                .append("score", new com.mongodb.BasicDBObject("$meta", "vectorSearchScore"))
+        ));
+
+        Aggregation aggregation = Aggregation.newAggregation(vectorSearch, project);
+
+        try {
+            List<com.mongodb.DBObject> results = mongoTemplate.aggregate(aggregation, "vector_team_a", com.mongodb.DBObject.class)
+                    .getMappedResults();
+            System.out.println("Aggregation Successful: " + results.size());
+            return results.stream()
+                    .filter(result -> (double) result.get("score") >= 0.7)
+                    .map(result -> {
+                        Map<String, Object> metadata = (Map<String, Object>) result.get("metadata");
+                        if (metadata == null) {
+                            metadata = new java.util.HashMap<>();
+                        }
+                        metadata.put("similarityScore", result.get("score"));
+                        return new Document((String) result.get("text"), metadata);
+                    })
+                    .collect(Collectors.toList());
+        } catch (Exception e) {
+            System.err.println("Aggregation Failed: " + e.getMessage());
+            e.printStackTrace();
+            throw e;
+        }
+    }
+}
+```
+
+- **Notes**:
+  - Replace `"vector_team_a"` with your actual collection name.
+  - Removed `exact: true` as it’s not supported.
+
+#### Step 3: Deployment to EKS
+
+1. **Build**:
+   ```bash
+   ./gradlew clean build
+   docker build -t your-app-image:tag .
+   docker push your-app-image:tag
+   ```
+
+2. **Deploy**:
+   ```yaml
+   apiVersion: apps/v1
+   kind: Deployment
+   metadata:
+     name: your-app
+   spec:
+     replicas: 1
+     selector:
+       matchLabels:
+         app: your-app
+     template:
+       metadata:
+         labels:
+           app: your-app
+       spec:
+         containers:
+         - name: your-app
+           image: your-app-image:tag
+           env:
+           - name: SPRING_PROFILES_ACTIVE
+             value: "teamA"
+           - name: SPRING_DATA_MONGODB_URI
+             value: "mongodb+srv://teamA_user:teamA_pass@xxxxx.mongodb.net/teamA_db?retryWrites=true&w=majority"
+           - name: SPRING_DATA_MONGODB_DATABASE
+             value: "teamA_db"
+   ```
+
+3. **Apply**:
+   ```bash
+   kubectl apply -f deployment.yaml
+   kubectl expose deployment your-app --type=LoadBalancer --port=8080
+   ```
+
+4. **Logs**:
+   ```bash
+   kubectl logs -f deployment/your-app
+   ```
+
+5. **Test**:
+   ```
+   curl "http://<external-ip>:8080/generate-prompt?flowIdentifier=simple_flow&userInput=What’s wrong?&sessionId=user123"
+   ```
+
+---
+
+### Expected Logs
+
+```
+Hosts Before Aggregation: [cluster0-shard-00-00.abc123.mongodb.net:27017, ...]
+Test Query Result: {"text": "...", "embedding": [...], "metadata": {...}}
+Aggregation Successful: 5
+```
+
+---
+
+### If It Still Fails
+
+If `localhost:28000` persists after aligning the driver:
+
+1. **Native Test**:
+   ```java
+   import com.mongodb.client.MongoClients;
+   import com.mongodb.client.MongoClient;
+   import com.mongodb.client.MongoCollection;
+   import org.bson.Document;
+
+   public class NativeVectorSearch {
+       public static void test(String uri, float[] queryEmbedding) {
+           try (MongoClient mongoClient = MongoClients.create(uri)) {
+               MongoCollection<Document> collection = mongoClient.getDatabase("teamA_db")
+                       .getCollection("vector_team_a");
+
+               Document pipeline = new Document("$vectorSearch", 
+                   new Document()
+                       .append("index", "vector_index")
+                       .append("path", "embedding")
+                       .append("queryVector", queryEmbedding)
+                       .append("numCandidates", 10)
+                       .append("limit", 5)
+               ).append("$project", 
+                   new Document()
+                       .append("_id", 0)
+                       .append("text", 1)
+                       .append("metadata", 1)
+                       .append("score", new Document("$meta", "vectorSearchScore"))
+               );
+
+               List<Document> results = collection.aggregate(java.util.Arrays.asList(pipeline)).into(new java.util.ArrayList<>());
+               System.out.println("Native Results: " + results.size());
+               results.forEach(System.out::println);
+           } catch (Exception e) {
+               System.err.println("Native Search Failed: " + e.getMessage());
+               e.printStackTrace();
+           }
+       }
+
+       public static void main(String[] args) {
+           String uri = "mongodb+srv://teamA_user:teamA_pass@xxxxx.mongodb.net/teamA_db?retryWrites=true&w=majority";
+           float[] queryEmbedding = new float[1536]; // Dummy embedding
+           test(uri, queryEmbedding);
+       }
+   }
+   ```
+   - Run locally to isolate EKS.
+
+2. **EKS Networking**:
+   - Test connectivity:
+     ```bash
+     kubectl exec -it <pod-name> -- telnet xxxxx.mongodb.net 27017
+     ```
+   - Use SSH tunnel if blocked:
+     ```yaml
+     spec:
+       containers:
+       - name: app
+         image: your-app-image:tag
+         env:
+         - name: SPRING_DATA_MONGODB_URI
+           value: "mongodb://teamA_user:teamA_pass@localhost:27017/teamA_db?retryWrites=true&w=majority"
+       - name: ssh-tunnel
+         image: alpine:latest
+         command: ["/bin/sh", "-c"]
+         args:
+         - "apk add openssh-client; ssh -L 27017:xxxxx.mongodb.net:27017 user@bastion-host -N"
+     ```
+
+3. **Driver Version Test**:
+   - Try `5.1.0` or `4.11.0`:
+     ```groovy
+     implementation 'org.mongodb:mongodb-driver-sync:5.1.0' // or 4.11.0
+     ```
+
+---
+
+### Next Steps
+
+1. **Deploy with Unified Driver**:
+   - Update `build.gradle` to use `5.2.1`, redeploy, and test.
+
+2. **Share Logs**:
+   - Post `kubectl logs` output, especially around `Aggregation Failed`.
+
+3. **Confirm Collection**:
+   - Replace `"vector_team_a"` with your actual collection name and let me know what it is.
+
+4. **Native Test**:
+   - Run the native code locally if possible.
+
+Aligning the driver should resolve the `localhost:28000` issue. Let me know the results!
