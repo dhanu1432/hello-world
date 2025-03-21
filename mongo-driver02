@@ -1,0 +1,302 @@
+That’s a game-changer—thank you for sharing that a Python program using the same `$vectorSearch` parameters, collection, and aggregation values works fine against your MongoDB Atlas cluster. This strongly suggests that the issue with `localhost:28000` in your Java/Spring Boot application on AWS EKS is not related to MongoDB Atlas itself, your collection (`vector_team_a`), the vector index (`vector_index`), or the network connectivity from your environment to Atlas (since Python succeeds). Instead, it’s specific to the Java MongoDB driver or Spring AI’s interaction with it in your EKS setup. Let’s leverage this insight to pinpoint and fix the problem.
+
+---
+
+### Key Takeaways
+
+- **Python Works**:
+  - Same collection (e.g., `vector_team_a`).
+  - Same `$vectorSearch` parameters: `index: "vector_index"`, `path: "embedding"`, `queryVector`, `numCandidates: 10`, `limit: 5`.
+  - Same projection: `_id: 0`, `text: 1`, `metadata: 1`, `score: $meta.vectorSearchScore`.
+  - No `localhost:28000` error, implying successful connection to Atlas (`xxxxx.mongodb.net:27017`).
+
+- **Java Fails**:
+  - Spring Boot `3.3.7`, Spring AI `1.0.0-M6`, MongoDB driver `5.2.1`.
+  - Fails with `Error connecting to localhost:28000 ... Connection refused` during `$vectorSearch` aggregation (manual or Spring AI).
+
+- **Environment**: AWS EKS, Atlas, bastion proxy for OpenAI.
+
+---
+
+### Why Python Succeeds and Java Fails
+
+1. **MongoDB Driver Differences**:
+   - Python likely uses `pymongo` (e.g., version `4.x`), which correctly handles Atlas `$vectorSearch` and connects to `xxxxx.mongodb.net:27017` without issues.
+   - Java’s MongoDB driver (`5.2.1`) might have a bug, misconfiguration, or different handling of `$vectorSearch` that redirects to `localhost:28000`.
+
+2. **Runtime Environment**:
+   - Python might run locally or in an environment with direct Atlas access, while your Java app in EKS might face a subtle configuration or classloading issue.
+
+3. **Spring AI or Driver Interaction**:
+   - Spring AI `1.0.0-M6` or the Java driver might override the `MongoClient` settings during `$vectorSearch`, a behavior not present in Python’s simpler client setup.
+
+---
+
+### Python Reference (for Comparison)
+
+Here’s a typical Python `$vectorSearch` that works (based on your description):
+
+```python
+from pymongo import MongoClient
+
+uri = "mongodb+srv://teamA_user:teamA_pass@xxxxx.mongodb.net/teamA_db?retryWrites=true&w=majority"
+client = MongoClient(uri)
+collection = client["teamA_db"]["vector_team_a"]
+
+query_embedding = [0.1] * 1536  # Example embedding
+
+pipeline = [
+    {
+        "$vectorSearch": {
+            "index": "vector_index",
+            "path": "embedding",
+            "queryVector": query_embedding,
+            "numCandidates": 10,
+            "limit": 5
+        }
+    },
+    {
+        "$project": {
+            "_id": 0,
+            "text": 1,
+            "metadata": 1,
+            "score": {"$meta": "vectorSearchScore"}
+        }
+    }
+]
+
+results = list(collection.aggregate(pipeline))
+print(f"Results: {len(results)}")
+for doc in results:
+    print(doc)
+```
+
+- **Assumption**: This or a similar script works for you, connecting to Atlas without `localhost:28000`.
+
+---
+
+### Fixing Java
+
+Since Python validates Atlas and the query, let’s fix Java by aligning it as closely as possible to Python’s success.
+
+#### Step 1: Minimal Java Test (Mimic Python)
+
+Test a standalone Java program outside Spring/EKS:
+
+```java
+import com.mongodb.client.MongoClients;
+import com.mongodb.client.MongoClient;
+import com.mongodb.client.MongoCollection;
+import org.bson.Document;
+import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.List;
+
+public class NativeVectorSearch {
+    public static void main(String[] args) {
+        String uri = "mongodb+srv://teamA_user:teamA_pass@xxxxx.mongodb.net/teamA_db?retryWrites=true&w=majority";
+        float[] queryEmbedding = new float[1536]; // Replace with real embedding if available
+        Arrays.fill(queryEmbedding, 0.1f); // Dummy data matching Python
+
+        try (MongoClient mongoClient = MongoClients.create(uri)) {
+            MongoCollection<Document> collection = mongoClient.getDatabase("teamA_db")
+                    .getCollection("vector_team_a");
+
+            Document vectorSearch = new Document("$vectorSearch", 
+                new Document()
+                    .append("index", "vector_index")
+                    .append("path", "embedding")
+                    .append("queryVector", queryEmbedding)
+                    .append("numCandidates", 10)
+                    .append("limit", 5)
+            );
+
+            Document project = new Document("$project", 
+                new Document()
+                    .append("_id", 0)
+                    .append("text", 1)
+                    .append("metadata", 1)
+                    .append("score", new Document("$meta", "vectorSearchScore"))
+            );
+
+            List<Document> results = collection.aggregate(Arrays.asList(vectorSearch, project))
+                    .into(new ArrayList<>());
+            System.out.println("Results: " + results.size());
+            results.forEach(System.out::println);
+        } catch (Exception e) {
+            System.err.println("Search Failed: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+}
+```
+
+- **Build**:
+  ```xml
+  <!-- pom.xml for standalone test -->
+  <dependencies>
+      <dependency>
+          <groupId>org.mongodb</groupId>
+          <artifactId>mongodb-driver-sync</artifactId>
+          <version>5.2.1</version>
+      </dependency>
+  </dependencies>
+  ```
+  ```bash
+  mvn compile exec:java -Dexec.mainClass="NativeVectorSearch"
+  ```
+
+- **If It Works**: Spring/EKS is the issue.
+- **If It Fails**: Driver or URI config problem.
+
+#### Step 2: Simplify Spring Setup
+
+Update `VectorSearchService` to use a standalone `MongoClient`:
+
+```java
+@Service
+public class VectorSearchService {
+
+    private final MongoClient mongoClient;
+    private final EmbeddingModel embeddingModel;
+    private final String collectionName = "vector_team_a"; // Replace with your collection name
+
+    public VectorSearchService(@Value("${spring.data.mongodb.uri}") String mongoUri, EmbeddingModel embeddingModel) {
+        this.mongoClient = MongoClients.create(mongoUri);
+        this.embeddingModel = embeddingModel;
+        System.out.println("MongoClient Hosts: " + mongoClient.getClusterDescription().getClusterSettings().getHosts());
+    }
+
+    public List<Document> retrieve(String query) {
+        MongoCollection<org.bson.Document> collection = mongoClient.getDatabase("teamA_db")
+                .getCollection(collectionName);
+
+        float[] queryEmbedding = embeddingModel.embed(query);
+
+        Document vectorSearch = new Document("$vectorSearch", 
+            new Document()
+                .append("index", "vector_index")
+                .append("path", "embedding")
+                .append("queryVector", queryEmbedding)
+                .append("numCandidates", 10)
+                .append("limit", 5)
+        );
+
+        Document project = new Document("$project", 
+            new Document()
+                .append("_id", 0)
+                .append("text", 1)
+                .append("metadata", 1)
+                .append("score", new Document("$meta", "vectorSearchScore"))
+        );
+
+        try {
+            List<org.bson.Document> results = collection.aggregate(Arrays.asList(vectorSearch, project))
+                    .into(new ArrayList<>());
+            System.out.println("Aggregation Successful: " + results.size());
+            return results.stream()
+                    .filter(result -> result.getDouble("score") >= 0.7)
+                    .map(result -> {
+                        Map<String, Object> metadata = (Map<String, Object>) result.get("metadata");
+                        if (metadata == null) {
+                            metadata = new HashMap<>();
+                        }
+                        metadata.put("similarityScore", result.get("score"));
+                        return new Document(result.getString("text"), metadata);
+                    })
+                    .collect(Collectors.toList());
+        } catch (Exception e) {
+            System.err.println("Aggregation Failed: " + e.getMessage());
+            e.printStackTrace();
+            throw e;
+        }
+    }
+}
+```
+
+- **Config**:
+  ```java
+  @Configuration
+  public class FlowConfig {
+      @Bean
+      public VectorSearchService vectorSearchService(@Value("${spring.data.mongodb.uri}") String mongoUri, EmbeddingModel embeddingModel) {
+          return new VectorSearchService(mongoUri, embeddingModel);
+      }
+  }
+  ```
+
+- **Deploy**:
+  ```bash
+  ./gradlew clean build
+  docker build -t your-app-image:tag .
+  docker push your-app-image:tag
+  kubectl apply -f deployment.yaml
+  kubectl logs -f deployment/your-app
+  ```
+
+#### Step 3: EKS Networking (Reconfirm)
+
+- **Telnet**:
+  ```bash
+  kubectl exec -it <pod-name> -- telnet xxxxx.mongodb.net 27017
+  ```
+- **DNS**:
+  ```bash
+  kubectl exec -it <pod-name> -- nslookup xxxxx.mongodb.net
+  ```
+- **Tunnel** (if needed):
+  ```yaml
+  spec:
+    containers:
+    - name: app
+      env:
+      - name: SPRING_DATA_MONGODB_URI
+        value: "mongodb://teamA_user:teamA_pass@localhost:27017/teamA_db?retryWrites=true&w=majority"
+    - name: ssh-tunnel
+      image: alpine:latest
+      command: ["/bin/sh", "-c"]
+      args:
+      - "apk add openssh-client; ssh -L 27017:xxxxx.mongodb.net:27017 user@bastion-host -N"
+  ```
+
+#### Step 4: Driver Version Exploration
+
+- **Try `5.1.0`** (Spring Boot’s original):
+  ```groovy
+  implementation ('org.springframework.boot:spring-boot-starter-data-mongodb') {
+      exclude group: 'org.mongodb', module: 'mongodb-driver-sync'
+  }
+  implementation 'org.mongodb:mongodb-driver-sync:5.1.0'
+  ```
+
+- **Try `4.11.0`** (closer to Python’s `pymongo` stability):
+  ```groovy
+  implementation 'org.mongodb:mongodb-driver-sync:4.11.0'
+  ```
+
+---
+
+### Expected Logs
+
+```
+MongoClient Hosts: [cluster0-shard-00-00.abc123.mongodb.net:27017, ...]
+Aggregation Successful: 5
+```
+
+---
+
+### Next Steps
+
+1. **Run Native Java Test**:
+   - Execute `NativeVectorSearch` locally and share the output.
+
+2. **Deploy Simplified Service**:
+   - Test the updated `VectorSearchService` in EKS and share logs.
+
+3. **Confirm Collection**:
+   - Verify `"vector_team_a"` is correct or provide your actual collection name.
+
+4. **Driver Test**:
+   - If needed, test `5.1.0` or `4.11.0`.
+
+Since Python works, Java should too with the right tweaks. Let’s get those logs and nail this down!
