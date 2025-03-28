@@ -1,0 +1,289 @@
+Since you already have Elasticsearch, Logstash, and Kibana (I assume "cabana" was a typo for "Kibana") in place to view your application logs, we can integrate Spring AI’s observation data into your existing setup. The goal is to log metrics like prompts, user inputs, and token counts as structured JSON events, send them through Logstash to Elasticsearch, and visualize them in Kibana. Below, I’ll tailor the solution to fit your current infrastructure, assuming your application logs are already being processed by Logstash.
+
+### Step-by-Step Integration
+
+#### Step 1: Enable Observations in Spring AI
+Ensure Spring AI captures the data you want (prompts, inputs, completions, etc.).
+
+##### Dependencies
+In your `pom.xml`, ensure these are included:
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-actuator</artifactId>
+</dependency>
+<dependency>
+    <groupId>org.springframework.ai</groupId>
+    <artifactId>spring-ai-openai-spring-boot-starter</artifactId>
+    <version>1.0.0-M2</version> <!-- Use the latest version -->
+</dependency>
+<dependency>
+    <groupId>net.logstash.logback</groupId>
+    <artifactId>logstash-logback-encoder</artifactId>
+    <version>7.4</version>
+</dependency>
+```
+
+##### Configuration
+Update `application.yml` to enable observation details:
+```yaml
+spring:
+  ai:
+    openai:
+      api-key: ${OPENAI_API_KEY} # Set as environment variable
+    chat:
+      client:
+        observations:
+          include-input: true    # Log user input
+          include-prompt: true   # Log prompts
+          include-completion: true # Log AI responses
+logging:
+  level:
+    org.springframework.ai: DEBUG # Ensure detailed AI logs
+```
+
+#### Step 2: Log Observations as Structured JSON
+Since you’re using Logstash, we’ll configure Spring Boot to output logs in a JSON format compatible with your existing Logstash pipeline.
+
+##### Custom Observation Handler
+Create a custom handler to log observation data:
+
+```java
+package com.example.demo;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationHandler;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class ObservationConfig {
+
+    private static final Logger logger = LoggerFactory.getLogger(ObservationConfig.class);
+    private static final ObjectMapper mapper = new ObjectMapper();
+
+    @Bean
+    public ObservationHandler loggingObservationHandler() {
+        return new ObservationHandler() {
+            @Override
+            public void onStop(Observation.Context context) {
+                try {
+                    // Log observation data as JSON
+                    String jsonLog = mapper.writeValueAsString(new ObservationLog(
+                        context.getName(),
+                        context.getLowCardinalityKeyValue("operation"),
+                        context.getLowCardinalityKeyValue("provider"),
+                        context.getHighCardinalityKeyValue("prompt"),
+                        context.getHighCardinalityKeyValue("input"),
+                        context.getHighCardinalityKeyValue("completion"),
+                        context.getContextualName()
+                    ));
+                    logger.info(jsonLog);
+                } catch (Exception e) {
+                    logger.error("Failed to log observation", e);
+                }
+            }
+
+            @Override
+            public boolean supportsContext(Observation.Context context) {
+                return true; // Handle all observations
+            }
+        };
+    }
+
+    private static class ObservationLog {
+        public String name;
+        public String operation;
+        public String provider;
+        public String prompt;
+        public String input;
+        public String completion;
+        public String contextualName;
+
+        public ObservationLog(String name, KeyValue operation, KeyValue provider, KeyValue prompt, KeyValue input, KeyValue completion, String contextualName) {
+            this.name = name;
+            this.operation = operation != null ? operation.getValue() : null;
+            this.provider = provider != null ? provider.getValue() : null;
+            this.prompt = prompt != null ? prompt.getValue() : null;
+            this.input = input != null ? input.getValue() : null;
+            this.completion = completion != null ? completion.getValue() : null;
+            this.contextualName = contextualName;
+        }
+    }
+}
+```
+
+##### Logback Configuration
+Update `logback-spring.xml` to use the Logstash encoder and send logs to your existing Logstash input:
+```xml
+<configuration>
+    <appender name="LOGSTASH" class="net.logstash.logback.appender.LogstashTcpSocketAppender">
+        <destination>localhost:5000</destination> <!-- Adjust to your Logstash host:port -->
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <fieldNames>
+                <timestamp>timestamp</timestamp>
+                <message>message</message>
+                <logger>logger</logger>
+                <level>level</level>
+            </fieldNames>
+        </encoder>
+    </appender>
+    <root level="INFO">
+        <appender-ref ref="LOGSTASH"/>
+    </root>
+</configuration>
+```
+
+- Replace `localhost:5000` with your actual Logstash TCP input (e.g., the port where Logstash listens for logs).
+
+#### Step 3: Integrate with Existing Logstash Pipeline
+Assuming your Logstash is already processing application logs and sending them to Elasticsearch, update your Logstash configuration to handle the JSON logs from Spring AI.
+
+##### Example Logstash Config (`logstash.conf`)
+If not already set up, here’s how your Logstash config might look:
+```
+input {
+  tcp {
+    port => 5000
+    codec => json_lines
+  }
+}
+
+filter {
+  json {
+    source => "message"
+    target => "parsed"
+  }
+  # Optional: Extract fields if needed
+  mutate {
+    rename => { "[parsed][prompt]" => "prompt" }
+    rename => { "[parsed][input]" => "input" }
+    rename => { "[parsed][completion]" => "completion" }
+    rename => { "[parsed][provider]" => "provider" }
+  }
+}
+
+output {
+  elasticsearch {
+    hosts => ["localhost:9200"] # Adjust to your Elasticsearch host
+    index => "spring-ai-logs-%{+yyyy.MM.dd}"
+  }
+}
+```
+
+- **Input**: Listens for JSON logs from your Spring Boot app.
+- **Filter**: Parses the JSON `message` field and flattens fields like `prompt`, `input`, etc., for easier querying in Kibana.
+- **Output**: Sends logs to an Elasticsearch index (e.g., `spring-ai-logs-2025.03.28`).
+
+If your existing Logstash pipeline already handles JSON logs, you may only need to ensure the index name matches your current setup or adjust the filter to merge these fields into your existing log structure.
+
+#### Step 4: Verify Logs in Kibana
+1. **Check Elasticsearch Index**:
+   - Ensure logs are appearing in the expected index (e.g., `spring-ai-logs-*`).
+   - Use Kibana’s **Dev Tools** to query: `GET spring-ai-logs-*/_search`.
+
+2. **Create/Update Index Pattern**:
+   - Go to **Management > Stack Management > Index Patterns** in Kibana.
+   - If your existing app logs use a different index pattern (e.g., `app-logs-*`), either:
+     - Update Logstash to send Spring AI logs to the same index.
+     - Create a new index pattern (e.g., `spring-ai-logs-*`) and use it alongside your existing one.
+   - Set `@timestamp` as the time field.
+
+3. **Explore in Discover**:
+   - Go to **Discover**.
+   - Select your index pattern.
+   - Verify fields like `prompt`, `input`, `completion`, and `provider` are present.
+
+#### Step 5: Create a Kibana Dashboard
+1. **Visualizations**:
+   - Go to **Visualize > Create Visualization**.
+   - Examples:
+     - **Prompt Count Over Time**:
+       - Type: Line Chart.
+       - Y-Axis: Count.
+       - X-Axis: Date Histogram on `@timestamp`.
+       - Filter: `prompt` exists.
+     - **Top User Inputs**:
+       - Type: Pie Chart.
+       - Bucket: Terms on `input`.
+     - **Completion Length**:
+       - Type: Metric.
+       - Aggregation: Average on `completion.length` (if length is logged; otherwise, add it in the handler).
+
+2. **Dashboard**:
+   - Go to **Dashboard > Create Dashboard**.
+   - Add your visualizations.
+   - Save as “Spring AI Metrics Dashboard”.
+
+#### Step 6: Handle Token Counts
+Spring AI doesn’t natively expose token counts in observations. To include them:
+- Modify the `ChatClient` call to capture token usage (if provided by the AI provider, e.g., OpenAI).
+- Log it explicitly in the `ObservationHandler`.
+
+##### Enhanced Chat Service
+```java
+package com.example.demo;
+
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.stereotype.Service;
+
+@Service
+public class ChatService {
+    private final ChatClient chatClient;
+
+    public ChatService(ChatClient.Builder chatClientBuilder) {
+        this.chatClient = chatClientBuilder.build();
+    }
+
+    public String getResponse(String prompt) {
+        ChatResponse response = chatClient.prompt()
+                .user(prompt)
+                .call()
+                .chatResponse();
+        // Log token usage if available
+        if (response.getMetadata() != null && response.getMetadata().getUsage() != null) {
+            System.out.println("Tokens used: " + response.getMetadata().getUsage().getTotalTokens());
+        }
+        return response.getResult().getOutput().getContent();
+    }
+}
+```
+
+- Update the `ObservationLog` class to include token counts if available from the response metadata.
+
+### Example Logs in Elasticsearch
+A sample log might look like:
+```json
+{
+  "@timestamp": "2025-03-28T10:00:00Z",
+  "logger": "com.example.demo.ObservationConfig",
+  "level": "INFO",
+  "message": "{\"name\":\"spring.ai.chat.client\",\"operation\":\"chat\",\"provider\":\"openai\",\"prompt\":\"Hello, AI!\",\"input\":\"Hello, AI!\",\"completion\":\"Hi there!\",\"contextualName\":\"chat-request\"}",
+  "parsed": {
+    "name": "spring.ai.chat.client",
+    "operation": "chat",
+    "provider": "openai",
+    "prompt": "Hello, AI!",
+    "input": "Hello, AI!",
+    "completion": "Hi there!",
+    "contextualName": "chat-request"
+  },
+  "prompt": "Hello, AI!",
+  "input": "Hello, AI!",
+  "completion": "Hi there!",
+  "provider": "openai"
+}
+```
+
+### Important Considerations
+1. **Token Counts**: If your AI provider doesn’t return token usage, you’ll need to estimate it (e.g., using a tokenizer library) or log it manually.
+2. **Existing Pipeline**: Ensure the new JSON logs align with your current Logstash filters. You might need to adjust the `mutate` filter to match your existing field names.
+3. **Sensitive Data**: Prompts and inputs may contain sensitive info. Mask them if necessary (e.g., in the `ObservationHandler` or Logstash filter).
+4. **Performance**: Logging every observation can increase load. Consider sampling in production.
+
+### Conclusion
+By logging Spring AI observations as JSON via Logback, sending them to your existing Logstash pipeline, and indexing them in Elasticsearch
