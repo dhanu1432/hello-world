@@ -1,0 +1,247 @@
+Let’s dive into the Spring AI framework’s Observation feature as it pertains to a Spring Boot project. I’ll explain what it is, how to use it, the details it provides, how to enable and configure it, and how to view the metrics it generates. I’ll also highlight key considerations and provide practical code examples to get you started.
+
+### What is Observation in the Spring AI Framework?
+
+In the context of the Spring AI framework, "Observation" refers to its observability capabilities, which are built on top of the Spring Framework and Spring Boot’s integration with **Micrometer**. Observability in Spring AI allows you to monitor and gain insights into AI-related operations, such as interactions with chat models, embedding models, image models, and vector stores. It leverages Micrometer’s Observation API to provide both **metrics** (quantitative data like counts and timings) and **traces** (detailed request flows) for these components.
+
+The Observation feature helps you:
+- Track performance (e.g., how long an AI model call takes).
+- Monitor usage (e.g., number of tokens sent to an AI model).
+- Debug issues by tracing the flow of data between your application and AI services.
+- Optimize costs by analyzing token usage or request patterns.
+
+This is particularly useful in AI-driven applications where understanding model interactions is critical for performance tuning and cost management.
+
+### How to Use It and What Details Can It Provide?
+
+Spring AI instruments key components like `ChatClient`, `ChatModel`, `EmbeddingModel`, `ImageModel`, and `VectorStore` to generate observations. These observations can include:
+- **Metrics**: Timers (e.g., duration of an AI call), counters (e.g., number of requests), and gauges (e.g., active connections).
+- **Traces**: A detailed breakdown of a request’s journey, including inputs, prompts, and completions.
+- **Metadata**: Contextual details like model provider (e.g., OpenAI, Ollama), request status, or custom tags.
+
+For example, when using `ChatClient` to interact with an AI model, you can capture:
+- The time taken to process a request.
+- The input prompt and response (if enabled).
+- Token usage (helpful for cost tracking with models like OpenAI).
+
+### How to Enable It?
+
+By default, observability is supported but requires specific dependencies and configuration to activate fully. Spring AI builds on Spring Boot’s observability infrastructure, so you’ll need to:
+1. Add the necessary dependencies.
+2. Configure properties to enable detailed observation data.
+
+#### Dependencies
+In a Spring Boot project, include these dependencies in your `pom.xml` (for Maven):
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-actuator</artifactId>
+</dependency>
+<dependency>
+    <groupId>io.micrometer</groupId>
+    <artifactId>micrometer-tracing-bridge-otel</artifactId>
+</dependency>
+<dependency>
+    <groupId>io.opentelemetry</groupId>
+    <artifactId>opentelemetry-exporter-otlp</artifactId>
+</dependency>
+<dependency>
+    <groupId>org.springframework.ai</groupId>
+    <artifactId>spring-ai-openai-spring-boot-starter</artifactId>
+    <version>1.0.0-M2</version> <!-- Use the latest version -->
+</dependency>
+```
+
+- `spring-boot-starter-actuator`: Provides the foundation for metrics and health endpoints.
+- `micrometer-tracing-bridge-otel`: Bridges Micrometer Tracing to OpenTelemetry.
+- `opentelemetry-exporter-otlp`: Exports telemetry data to an OpenTelemetry-compatible backend (e.g., Jaeger, Zipkin).
+- `spring-ai-openai-spring-boot-starter`: Adds Spring AI support for OpenAI (or substitute with another model starter).
+
+#### Enable Observations
+Observations for AI components are **disabled by default** to avoid capturing sensitive data. Enable them via application properties in `application.yml`:
+
+```yaml
+spring:
+  ai:
+    chat:
+      client:
+        observations:
+          include-input: true    # Include input data in traces
+          include-prompt: true   # Include prompts in traces
+          include-completion: true # Include model responses in traces
+    image:
+      observations:
+        include-prompt: true    # Include image prompts
+    vectorstore:
+      observations:
+        include-query-response: true # Include vector store query responses
+```
+
+These settings control what data is captured as span attributes in traces.
+
+### How to Configure It?
+
+Configuration involves setting up the observability backend and customizing the data collected:
+1. **Observation Registry**: Spring Boot auto-configures an `ObservationRegistry` bean, which you can inject to create custom observations.
+2. **Backend Setup**: Use a tool like Prometheus (for metrics) and Jaeger/Zippin (for traces) to collect and visualize data.
+3. **Custom Tags**: Add metadata (e.g., user ID, model type) to observations for richer insights.
+
+#### Example Configuration with Prometheus and Jaeger
+Add Prometheus dependency:
+
+```xml
+<dependency>
+    <groupId>io.micrometer</groupId>
+    <artifactId>micrometer-registry-prometheus</artifactId>
+</dependency>
+```
+
+Update `application.yml`:
+
+```yaml
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,prometheus
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+  tracing:
+    sampling:
+      probability: 1.0 # Sample all requests (for demo purposes)
+```
+
+Run Jaeger locally (e.g., via Docker):
+```bash
+docker run -d --name jaeger -p 16686:16686 -p 4317:4317 jaegertracing/all-in-one:latest
+```
+
+### How to View the Metrics?
+
+- **Metrics**: Access via `/actuator/prometheus` endpoint (e.g., `http://localhost:8080/actuator/prometheus`) or visualize in Prometheus/Grafana.
+- **Traces**: View in Jaeger UI (e.g., `http://localhost:16686`).
+
+#### Example Metrics Output
+For a `ChatClient` call, you might see:
+```
+spring_ai_chat_client_request_duration_seconds{operation="chat", provider="openai", status="success"} 0.523
+spring_ai_chat_client_requests_total{operation="chat", provider="openai", status="success"} 1.0
+```
+
+#### Viewing in Tools
+- **Prometheus**: Scrape metrics from `/actuator/prometheus` and query them (e.g., `rate(spring_ai_chat_client_request_duration_seconds_sum[5m])`).
+- **Jaeger**: Check traces for spans like `spring.ai.chat.client` with input/output details.
+
+### Code Examples with Spring Boot
+
+Here’s a complete example integrating Spring AI with observability:
+
+#### 1. Main Application
+```java
+package com.example.demo;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class DemoApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(DemoApplication.class, args);
+    }
+}
+```
+
+#### 2. Chat Service
+```java
+package com.example.demo;
+
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.stereotype.Service;
+
+@Service
+public class ChatService {
+    private final ChatClient chatClient;
+
+    public ChatService(ChatClient.Builder chatClientBuilder) {
+        this.chatClient = chatClientBuilder.build();
+    }
+
+    public String getResponse(String prompt) {
+        return chatClient.prompt()
+                .user(prompt)
+                .call()
+                .content();
+    }
+}
+```
+
+#### 3. REST Controller
+```java
+package com.example.demo;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class ChatController {
+    private final ChatService chatService;
+
+    public ChatController(ChatService chatService) {
+        this.chatService = chatService;
+    }
+
+    @GetMapping("/chat")
+    public String chat(@RequestParam String message) {
+        return chatService.getResponse(message);
+    }
+}
+```
+
+#### 4. Application Properties (`application.yml`)
+```yaml
+spring:
+  ai:
+    openai:
+      api-key: ${OPENAI_API_KEY} # Set as environment variable
+    chat:
+      client:
+        observations:
+          include-input: true
+          include-prompt: true
+          include-completion: true
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,prometheus
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+  tracing:
+    sampling:
+      probability: 1.0
+```
+
+#### 5. Running the Example
+1. Set the `OPENAI_API_KEY` environment variable.
+2. Run the app: `mvn spring-boot:run`.
+3. Test: `curl "http://localhost:8080/chat?message=Hello, AI!"`.
+4. Check metrics at `http://localhost:8080/actuator/prometheus`.
+5. View traces in Jaeger at `http://localhost:16686`.
+
+### Important Things to Be Aware Of
+
+1. **Sensitive Data**: Enabling `include-input`, `include-prompt`, or `include-completion` may log sensitive information (e.g., user inputs). Use with caution in production and consider filtering or masking data.
+2. **Performance Overhead**: Collecting detailed traces and metrics adds overhead. Adjust sampling rates (`spring.tracing.sampling.probability`) for production to balance insight and performance.
+3. **Cardinality**: Avoid high-cardinality tags (e.g., user IDs in metrics) as they can overwhelm monitoring systems. Use low-cardinality tags (e.g., model type) instead.
+4. **Dependencies**: Ensure compatibility between Spring AI, Micrometer, and your chosen backend (e.g., Prometheus, Jaeger). Check versions carefully.
+5. **Cost Monitoring**: For AI models with token-based pricing (e.g., OpenAI), use metrics to track token usage and avoid unexpected costs.
+
+### Conclusion
+
+The Observation feature in Spring AI, powered by Micrometer, provides a robust way to monitor and debug AI interactions in your Spring Boot application. By enabling it with the right dependencies and configurations, you can gain valuable insights into performance, usage, and data flow. The example above demonstrates a simple setup, but you can extend it with custom observations, filters, or advanced visualization tools like Grafana. Keep an eye on data sensitivity and performance impacts as you scale!
