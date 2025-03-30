@@ -1,0 +1,94 @@
+To configure Spring AI’s MongoDB Atlas Vector Store to use pre-computed embeddings for similarity searches instead of computing new embeddings for every query, you need to bypass the default behavior where the EmbeddingModel is invoked to generate embeddings for the search query. By default, Spring AI’s similaritySearch method converts the query text into a vector using the configured EmbeddingModel and then performs a vector search. However, if you already have pre-computed embeddings stored in your MongoDB collection, you can optimize this process by directly using those embeddings.
+Here’s how you can achieve this:
+Understanding the Default Behavior
+Spring AI’s MongoDBAtlasVectorStore relies on an EmbeddingModel to transform the query string into a vector before executing the $vectorSearch operation in MongoDB. This is useful when working with dynamic queries, but if your application already stores pre-computed embeddings (e.g., in a field like precomputed_embedding in your MongoDB collection), you can avoid this overhead by providing the pre-computed vector directly to the search operation.
+Solution: Use Pre-Computed Embeddings
+Spring AI does not natively provide a built-in method to pass pre-computed embeddings directly to the similaritySearch method out of the box. However, you can leverage the underlying MongoDB client to perform a custom vector search using the $vectorSearch aggregation pipeline with your pre-computed embedding. This requires accessing the native MongoDB client provided by the MongoDBAtlasVectorStore and constructing the query manually.
+Steps to Implement
+	1	Ensure Your MongoDB Schema Supports Pre-Computed Embeddings Verify that your MongoDB collection contains a field with pre-computed embeddings (e.g., precomputed_embedding) alongside the original content and metadata. The embedding should be stored as an array of floats (e.g., [0.1, 0.2, ..., 0.3]), matching the dimensionality of the model used to generate it. Example schema: {
+	2	  "_id": "some_id",
+	3	  "content": "Sample text",
+	4	  "metadata": { "key": "value" },
+	5	  "precomputed_embedding": [0.1, 0.2, 0.3, ..., 0.4]
+	6	}
+	7	
+	8	Access the Native MongoDB Client The MongoDBAtlasVectorStore provides access to the underlying MongoClient via the getNativeClient() method. You can use this to execute a custom aggregation pipeline. import com.mongodb.client.MongoClient;
+	9	import org.springframework.ai.vectorstore.MongoDBAtlasVectorStore;
+	10	import org.springframework.context.ApplicationContext;
+	11	
+	12	MongoDBAtlasVectorStore vectorStore = applicationContext.getBean(MongoDBAtlasVectorStore.class);
+	13	Optional nativeClient = vectorStore.getNativeClient();
+	14	
+	15	Construct a Custom Vector Search Query Use the $vectorSearch aggregation stage with the queryVector parameter set to your pre-computed embedding. This allows you to specify the exact vector to search against without invoking the EmbeddingModel. Example code: import com.mongodb.client.MongoClients;
+	16	import com.mongodb.client.MongoCollection;
+	17	import com.mongodb.client.model.Aggregates;
+	18	import com.mongodb.client.model.Filters;
+	19	import com.mongodb.client.model.Projections;
+	20	import org.bson.Document;
+	21	
+	22	if (nativeClient.isPresent()) {
+	23	    MongoClient client = nativeClient.get();
+	24	    MongoCollection collection = client.getDatabase("your_database")
+	25	            .getCollection("your_collection_name");
+	26	
+	27	    // Your pre-computed embedding as a float array
+	28	    float[] precomputedQueryVector = {0.1f, 0.2f, 0.3f, ..., 0.4f}; // Replace with your actual pre-computed vector
+	29	
+	30	    // Define the vector search pipeline
+	31	    List pipeline = Arrays.asList(
+	32	        new Document("$vectorSearch", new Document()
+	33	            .append("index", "vector_index") // Name of your vector search index
+	34	            .append("queryVector", precomputedQueryVector)
+	35	            .append("path", "precomputed_embedding") // Field containing pre-computed embeddings
+	36	            .append("numCandidates", 100) // Number of candidates to consider
+	37	            .append("limit", 5)), // Number of results to return
+	38	        Aggregates.project(Projections.fields(
+	39	            Projections.include("content", "metadata"),
+	40	            Projections.excludeId()
+	41	        ))
+	42	    );
+	43	
+	44	    // Execute the aggregation
+	45	    MongoCursor cursor = collection.aggregate(pipeline).iterator();
+	46	    List results = new ArrayList<>();
+	47	    while (cursor.hasNext()) {
+	48	        results.add(cursor.next());
+	49	    }
+	50	    cursor.close();
+	51	
+	52	    // Process results
+	53	    for (Document result : results) {
+	54	        System.out.println("Content: " + result.get("content"));
+	55	        System.out.println("Metadata: " + result.get("metadata"));
+	56	    }
+	57	}
+	58	
+	59	Configure the Vector Search Index Ensure that your MongoDB Atlas Vector Search index is configured to use the precomputed_embedding field as the vector field. The index definition should match the dimensionality of your pre-computed embeddings. You can create or update the index via the Atlas UI or API. Example index definition (JSON): {
+	60	  "fields": [
+	61	    {
+	62	      "type": "vector",
+	63	      "path": "precomputed_embedding",
+	64	      "numDimensions": 1536, // Match the dimensionality of your pre-computed embeddings
+	65	      "similarity": "cosine" // Or "euclidean", "dotProduct" based on your use case
+	66	    }
+	67	  ]
+	68	}
+	69	
+	70	Integrate with Spring AI Since you’re bypassing the similaritySearch method, you’ll need to handle the result processing manually. If you want to integrate this with Spring AI’s Document objects, you can convert the Document results into org.springframework.ai.document.Document instances. Example conversion: import org.springframework.ai.document.Document;
+	71	
+	72	List springAiDocuments = results.stream()
+	73	    .map(doc -> new Document(
+	74	        doc.getString("content"),
+	75	        (Map) doc.get("metadata")
+	76	    ))
+	77	    .collect(Collectors.toList());
+	78	
+Considerations
+	•	Performance: Using pre-computed embeddings eliminates the need to call the EmbeddingModel for each query, which can significantly improve performance, especially for frequent searches.
+	•	Dimensionality Match: Ensure the numDimensions in your index matches the length of your pre-computed embedding vectors to avoid errors.
+	•	Index Maintenance: If your pre-computed embeddings are updated, you’ll need to re-index the collection accordingly.
+	•	Spring AI Limitation: The current Spring AI API does not provide a direct way to pass a pre-computed vector to similaritySearch. This workaround relies on the native MongoDB client, which might not align perfectly with Spring AI’s abstraction layer. Future versions of Spring AI might address this with additional configuration options.
+Alternative Approach
+If you prefer to stay within Spring AI’s API, you could extend MongoDBAtlasVectorStore to override the similaritySearch behavior. However, this would require custom implementation and might not be officially supported. A simpler approach is to stick with the native client method described above.
+Conclusion
+By using the native MongoDB client and the $vectorSearch aggregation stage with your pre-computed embedding, you can avoid redundant embedding computations. This approach leverages MongoDB’s vector search capabilities directly and integrates with your existing Spring AI setup. Test this solution with your data to ensure compatibility with your index configuration and application requirements.
