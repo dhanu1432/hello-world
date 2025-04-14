@@ -1,0 +1,310 @@
+The issue with your prediction code failing is likely due to a mismatch between the model architecture used during training (the improved 2-layer GRU from the enhanced script) and the model architecture defined in your prediction script (a single-layer GRU). Specifically, the `gru_classifier.pt` file was saved from a model with two GRU layers, dropout, and possibly different hyperparameters, but your prediction script defines a `GRUClassifier` with only one GRU layer and no dropout. When you try to load the saved `state_dict` into this mismatched model, PyTorch raises an error because the parameter shapes and names do not align.
+
+Below, I’ll explain the issues in detail, identify the root cause, and provide a corrected version of your prediction code. I’ll also suggest additional improvements to make it more robust for production use.
+
+---
+
+### Root Cause of the Failure
+
+1. **Model Architecture Mismatch**:
+   - **Training Model (from enhanced script)**: The `GRUClassifier` in the improved training script has:
+     - `num_layers=2` (two GRU layers).
+     - A dropout layer (`self.dropout = nn.Dropout(dropout)`).
+     - The GRU’s hidden state from the last layer is used (`h = h[-1]`).
+     - Possibly different `hidden_dim` or `dropout` values if you modified the config.
+   - **Prediction Model**: Your prediction script defines `GRUClassifier` as:
+     - Single-layer GRU (`nn.GRU(input_dim, hidden_dim, batch_first=True)` defaults to `num_layers=1`).
+     - No dropout layer.
+     - Uses `h.squeeze(0)` instead of `h[-1]`.
+   - **Impact**: When `model.load_state_dict(torch.load("gru_classifier.pt"))` is called, PyTorch expects the model’s parameters (e.g., weights for two GRU layers, dropout) to match the saved `state_dict`. Since the prediction model has fewer parameters (only one GRU layer), you likely get an error like:
+     ```
+     RuntimeError: Error(s) in loading state_dict for GRUClassifier:
+         Missing key(s) in state_dict: "gru.weight_ih_l1", "gru.weight_hh_l1", ...
+         Unexpected key(s) in state_dict: "dropout.weight", ...
+     ```
+
+2. **Input Dimension Handling**:
+   - Your prediction script assumes the embedding dimension from `get_embedding` matches the `input_dim` used during training. The `text-embedding-3-small` model from OpenAI produces embeddings of dimension 1536 (by default, unless customized). If the training data in `labeled_embeddings.json` had a different embedding dimension, the model’s `input_dim` won’t match, causing a runtime error during the forward pass.
+
+3. **Lack of Error Handling**:
+   - The prediction script doesn’t validate the embedding or handle potential errors (e.g., API failures, file loading issues, or tensor shape mismatches), which could obscure the true cause of failure.
+
+4. **Device Management**:
+   - You correctly use `map_location=torch.device('cpu')` to ensure the model loads on CPU, but if the training was done on GPU and the model expects CUDA tensors, subtle issues could arise without explicit device handling.
+
+---
+
+### Step-by-Step Diagnosis
+
+To confirm the issue, let’s analyze the key components:
+
+- **Training Model** (from the enhanced script you referenced):
+  ```python
+  class GRUClassifier(nn.Module):
+      def __init__(self, input_dim, hidden_dim=64, num_layers=2, dropout=0.3):
+          super().__init__()
+          self.gru = nn.GRU(input_dim, hidden_dim, num_layers=num_layers, batch_first=True, dropout=dropout if num_layers > 1 else 0)
+          self.dropout = nn.Dropout(dropout)
+          self.fc = nn.Linear(hidden_dim, 2)
+      
+      def forward(self, x):
+          x = x.unsqueeze(1)
+          _, h = self.gru(x)
+          h = h[-1]  # Take the last layer's hidden state
+          h = self.dropout(h)
+          logits = self.fc(h)
+          return logits
+  ```
+  - Parameters include weights for two GRU layers (`weight_ih_l0`, `weight_hh_l0`, `weight_ih_l1`, `weight_hh_l1`, etc.), dropout, and the final linear layer.
+
+- **Prediction Model** (from your script):
+  ```python
+  class GRUClassifier(nn.Module):
+      def __init__(self, input_dim, hidden_dim=64):
+          super().__init__()
+          self.gru = nn.GRU(input_dim, hidden_dim, batch_first=True)
+          self.fc = nn.Linear(hidden_dim, 2)
+
+      def forward(self, x):
+          x = x.unsqueeze(1)
+          _, h = self.gru(x)
+          logits = self.fc(h.squeeze(0))
+          return logits
+  ```
+  - Parameters include weights for one GRU layer (`weight_ih_l0`, `weight_hh_l0`, etc.) and the linear layer, but no dropout or second GRU layer.
+
+- **Loading the Model**:
+  ```python
+  model.load_state_dict(torch.load("gru_classifier.pt", map_location=torch.device('cpu')))
+  ```
+  - The `state_dict` in `gru_classifier.pt` contains keys for two GRU layers and dropout, which don’t exist in the prediction model’s `state_dict`, causing the loading to fail.
+
+- **Embedding Dimension**:
+  - If `labeled_embeddings.json` used embeddings from a different source (e.g., not `text-embedding-3-small`), the `input_dim` during training might not be 1536. Your prediction script dynamically sets `input_dim = len(embedding)`, which could lead to a mismatch if not validated.
+
+---
+
+### Corrected Prediction Code
+
+To fix the issue, the prediction script’s `GRUClassifier` must match the training script’s architecture exactly. Below is the corrected code, aligned with the 2-layer GRU from the enhanced training script, along with additional robustness improvements.
+
+```python
+import torch
+import torch.nn as nn
+import numpy as np
+import openai
+import os
+from dotenv import load_dotenv
+
+# ------------------------------
+# Load API Key
+# ------------------------------
+load_dotenv()
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    raise ValueError("OPENAI_API_KEY not found in environment variables")
+client = openai.OpenAI(api_key=api_key)
+
+# ------------------------------
+# GRU Classifier
+# ------------------------------
+class GRUClassifier(nn.Module):
+    def __init__(self, input_dim, hidden_dim=64, num_layers=2, dropout=0.3):
+        super().__init__()
+        self.gru = nn.GRU(input_dim, hidden_dim, num_layers=num_layers, batch_first=True, dropout=dropout if num_layers > 1 else 0)
+        self.dropout = nn.Dropout(dropout)
+        self.fc = nn.Linear(hidden_dim, 2)
+    
+    def forward(self, x):
+        x = x.unsqueeze(1)
+        _, h = self.gru(x)
+        h = h[-1]  # Take the last layer's hidden state
+        h = self.dropout(h)
+        logits = self.fc(h)
+        return logits
+
+# ------------------------------
+# Embedding Function
+# ------------------------------
+def get_embedding(text, model="text-embedding-3-small"):
+    try:
+        response = client.embeddings.create(model=model, input=text)
+        return np.array(response.data[0].embedding, dtype=np.float32)
+    except Exception as e:
+        raise RuntimeError(f"Failed to get embedding: {str(e)}")
+
+# ------------------------------
+# Prediction
+# ------------------------------
+def predict(model, embedding, device):
+    if not isinstance(embedding, (list, np.ndarray)) or not len(embedding):
+        raise ValueError("Embedding must be a non-empty list or numpy array")
+    embedding = torch.tensor(embedding, dtype=torch.float32).unsqueeze(0).to(device)
+    model.eval()
+    with torch.no_grad():
+        output = model(embedding)
+        pred = torch.argmax(output, dim=1).item()
+        return "yes" if pred == 1 else "no"
+
+# ------------------------------
+# Main
+# ------------------------------
+if __name__ == "__main__":
+    # Configuration (adjust based on training setup)
+    INPUT_DIM = 1536  # Default for text-embedding-3-small
+    HIDDEN_DIM = 64
+    NUM_LAYERS = 2
+    DROPOUT = 0.3
+    MODEL_PATH = "gru_classifier.pt"
+    
+    # Set device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Initialize model
+    try:
+        model = GRUClassifier(INPUT_DIM, HIDDEN_DIM, NUM_LAYERS, DROPOUT).to(device)
+        if not os.path.exists(MODEL_PATH):
+            raise FileNotFoundError(f"Model file {MODEL_PATH} not found")
+        model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+    except Exception as e:
+        raise RuntimeError(f"Failed to load model: {str(e)}")
+    
+    # Get user input and predict
+    try:
+        user_input = input("Enter user input: ")
+        if not user_input.strip():
+            raise ValueError("Input cannot be empty")
+        embedding = get_embedding(user_input)
+        if len(embedding) != INPUT_DIM:
+            raise ValueError(f"Embedding dimension {len(embedding)} does not match expected {INPUT_DIM}")
+        prediction = predict(model, embedding, device)
+        print(f"Prediction: {prediction}")
+    except Exception as e:
+        print(f"Error: {str(e)}")
+```
+
+---
+
+### Key Fixes and Improvements
+
+1. **Aligned Model Architecture**:
+   - Updated `GRUClassifier` to match the training script:
+     - Added `num_layers=2` and `dropout=0.3`.
+     - Included `self.dropout = nn.Dropout(dropout)` and used `h = h[-1]` in `forward`.
+   - This ensures the `state_dict` from `gru_classifier.pt` loads correctly.
+
+2. **Fixed Input Dimension**:
+   - Hardcoded `INPUT_DIM = 1536` to match `text-embedding-3-small`’s output.
+   - Added validation to ensure the embedding’s length matches `INPUT_DIM`.
+   - **Note**: You must confirm the `input_dim` used during training (check `labeled_embeddings.json` or the training script’s `config`). If it’s not 1536, update `INPUT_DIM` accordingly.
+
+3. **Device Management**:
+   - Added dynamic device selection (`cuda` or `cpu`) and ensured tensors are moved to the correct device.
+   - Used `map_location=device` to handle cross-device loading.
+
+4. **Error Handling**:
+   - Added checks for:
+     - Missing API key.
+     - Empty or invalid input.
+     - API call failures.
+     - Model file existence.
+     - Embedding dimension mismatch.
+     - Model loading errors.
+   - Wrapped main logic in `try-except` to provide clear error messages.
+
+5. **Robust Prediction**:
+   - Validated the embedding input in `predict`.
+   - Ensured the model is in `eval` mode and used `torch.no_grad()` for efficiency.
+
+6. **Configuration**:
+   - Defined hyperparameters (`HIDDEN_DIM`, `NUM_LAYERS`, `DROPOUT`) explicitly to match the training setup.
+   - **Tip**: If you used a different `hidden_dim` or `dropout` in training, update these values to match the `config` from the training script.
+
+---
+
+### How to Verify the Fix
+
+1. **Check Training `input_dim`**:
+   - Open `labeled_embeddings.json` and check the length of an `embedding` (e.g., `len(data[0]["embedding"])`).
+   - Alternatively, review the training script’s output or `config` to confirm `input_dim`.
+   - Ensure `INPUT_DIM` in the prediction script matches this value.
+
+2. **Confirm Hyperparameters**:
+   - Verify that `HIDDEN_DIM`, `NUM_LAYERS`, and `DROPOUT` match the training script’s values (defaults: `hidden_dim=64`, `num_layers=2`, `dropout=0.3`).
+
+3. **Test the Script**:
+   - Run the corrected script with a sample input.
+   - Example:
+     ```bash
+     Enter user input: This is a test sentence
+     Prediction: yes
+     ```
+   - If it fails, note the error message for further debugging.
+
+4. **Debugging Tips**:
+   - If you get a `state_dict` error, print the keys to compare:
+     ```python
+     print(torch.load(MODEL_PATH).keys())
+     print(model.state_dict().keys())
+     ```
+   - If the embedding dimension is wrong, print `len(embedding)` after `get_embedding`.
+
+---
+
+### Additional Improvements for Production
+
+1. **Save Model Metadata**:
+   - During training, save a metadata file with `input_dim`, `hidden_dim`, `num_layers`, and `dropout`:
+     ```python
+     # In training script
+     metadata = {'input_dim': input_dim, 'hidden_dim': config['hidden_dim'], 'num_layers': config['num_layers'], 'dropout': config['dropout']}
+     with open('model_metadata.json', 'w') as f:
+         json.dump(metadata, f)
+     ```
+   - Load it in the prediction script:
+     ```python
+     with open('model_metadata.json', 'r') as f:
+         metadata = json.load(f)
+     model = GRUClassifier(**metadata).to(device)
+     ```
+
+2. **Embedding Model Consistency**:
+   - Ensure the embedding model (`text-embedding-3-small`) matches the one used to create `labeled_embeddings.json`. If training used a different model, update `get_embedding` accordingly.
+
+3. **Batch Prediction**:
+   - Support multiple inputs:
+     ```python
+     def predict_batch(model, embeddings, device):
+         embeddings = torch.tensor(embeddings, dtype=torch.float32).to(device)
+         model.eval()
+         with torch.no_grad():
+             outputs = model(embeddings)
+             preds = torch.argmax(outputs, dim=1).cpu().numpy()
+             return ["yes" if p == 1 else "no" for p in preds]
+     ```
+
+4. **Logging**:
+   - Log predictions and errors:
+     ```python
+     import logging
+     logging.basicConfig(filename='predict.log', level=logging.INFO)
+     logging.info(f"Input: {user_input}, Prediction: {prediction}")
+     ```
+
+5. **Command-Line Interface**:
+   - Allow input via CLI:
+     ```python
+     import argparse
+     parser = argparse.ArgumentParser()
+     parser.add_argument('--input', type=str, required=True, help="Text to classify")
+     args = parser.parse_args()
+     user_input = args.input
+     ```
+
+---
+
+### Why the Fix Works
+
+By aligning the `GRUClassifier` architecture with the training script (2 layers, dropout, correct `forward` logic) and validating the `input_dim`, the `state_dict` loading succeeds. The added error handling ensures that issues like API failures or dimension mismatches are caught early, making the script more robust. The device management ensures compatibility across CPU/GPU environments.
+
+If you still encounter issues, please share the exact error message or confirm the `input_dim` and hyperparameters used during training, and I can refine the solution further.
