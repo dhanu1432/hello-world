@@ -2,7 +2,7 @@ Below is the JSON file with 250 unique utterances for each of the three labels, 
 
 ```json
 {
-  "mobility_cant_make_calls": [
+  "mol_ca_make_calls": [
     "I can't make calls",
     "Not able to make call",
     "Calls not going",
@@ -253,7 +253,7 @@ Below is the JSON file with 250 unique utterances for each of the three labels, 
     "Calls failing to place",
     "Can't get calls connected"
   ],
-  "mobility_cant_receive_calls": [
+  "mi_cant_receive_calls": [
     "Not receiving call",
     "Can't get calls",
     "Issue with receiving calls",
@@ -511,7 +511,7 @@ Below is the JSON file with 250 unique utterances for each of the three labels, 
     "No calls connecting",
     "Can't receive any calls on phone"
   ],
-  "mobility_dropped_calls": [
+  "mdropped_calls": [
     "Dropping calls",
     "Call cuts in middle",
     "Experiencing dropped calls",
