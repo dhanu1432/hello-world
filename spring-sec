@@ -1,0 +1,296 @@
+To implement two types of authentication (Basic Auth and External Authentication) in a Spring Boot 3.3.7 application with Spring Security, you need to configure Spring Security to handle different authentication mechanisms based on URL patterns. Here's a step-by-step guide to achieve this:
+
+### Key Requirements
+1. **Basic Auth** for endpoints starting with `/v1/`:
+   - Uses `UserDetailsService` for username/password authentication.
+2. **External Authentication** for endpoints starting with `/diag/auth/v1`:
+   - Makes a REST call to an external service using the `Authorization` header for authentication.
+3. Ensure the two authentication mechanisms are isolated and applied to their respective URL patterns.
+
+### Solution
+
+You can achieve this by:
+- Using **multiple `SecurityFilterChain` configurations** to handle different URL patterns with distinct authentication mechanisms.
+- Implementing a custom `AuthenticationProvider` or filter for the external authentication logic.
+- Configuring Spring Security to apply Basic Auth and the external authentication logic appropriately.
+
+Below is a detailed implementation:
+
+---
+
+### Step 1: Dependencies
+
+Ensure your `pom.xml` includes the necessary dependencies for Spring Boot and Spring Security:
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-security</artifactId>
+</dependency>
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-web</artifactId>
+</dependency>
+<!-- For REST calls to external service -->
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-webflux</artifactId>
+</dependency>
+```
+
+---
+
+### Step 2: Configure Basic Auth with `UserDetailsService`
+
+Set up a `UserDetailsService` for Basic Auth. For simplicity, you can use an in-memory user store, but in a real application, you might use a database.
+
+```java
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.core.userdetails.User;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.provisioning.InMemoryUserDetailsManager;
+
+@Configuration
+public class UserDetailsConfig {
+
+    @Bean
+    public UserDetailsService userDetailsService() {
+        var user = User.withUsername("user")
+                .password("{noop}password") // Use proper password encoder in production
+                .roles("USER")
+                .build();
+        return new InMemoryUserDetailsManager(user);
+    }
+}
+```
+
+---
+
+### Step 3: Implement External Authentication Logic
+
+For external authentication, create a custom `AuthenticationProvider` or a filter that extracts the `Authorization` header, makes a REST call to the external service, and authenticates the user based on the response.
+
+Here’s an example using a custom `AuthenticationProvider`:
+
+```java
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.security.authentication.AuthenticationProvider;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.AuthenticationException;
+import org.springframework.stereotype.Component;
+import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Mono;
+
+@Component
+public class ExternalAuthenticationProvider implements AuthenticationProvider {
+
+    private final WebClient webClient;
+
+    public ExternalAuthenticationProvider(WebClient.Builder webClientBuilder) {
+        this.webClient = webClientBuilder.baseUrl("http://external-service/api/auth").build();
+    }
+
+    @Override
+    public Authentication authenticate(Authentication authentication) throws AuthenticationException {
+        String authHeader = (String) authentication.getCredentials(); // Authorization header
+
+        // Make REST call to external service
+        Mono<String> response = webClient.get()
+                .header(HttpHeaders.AUTHORIZATION, authHeader)
+                .retrieve()
+                .onStatus(status -> status != HttpStatus.OK, clientResponse -> 
+                        Mono.error(new AuthenticationException("External auth failed") {}))
+                .bodyToMono(String.class);
+
+        // Block for simplicity (in production, handle async properly)
+        String result = response.block();
+
+        // Assuming external service returns a username or token on success
+        if (result != null && !result.isEmpty()) {
+            // Create authenticated token (customize roles/authorities as needed)
+            return new UsernamePasswordAuthenticationToken(
+                    result, // Principal (e.g., username or user ID from external service)
+                    authHeader,
+                    List.of(new SimpleGrantedAuthority("ROLE_EXTERNAL_USER"))
+            );
+        }
+
+        throw new AuthenticationException("External authentication failed") {};
+    }
+
+    @Override
+    public boolean supports(Class<?> authentication) {
+        return UsernamePasswordAuthenticationToken.class.isAssignableFrom(authentication);
+    }
+}
+```
+
+---
+
+### Step 4: Configure Spring Security with Multiple `SecurityFilterChain`s
+
+Use two `SecurityFilterChain` beans to separate the authentication logic for `/v1/` (Basic Auth) and `/diag/auth/v1` (External Auth). The order of the filter chains matters, so use `@Order` to ensure proper precedence.
+
+```java
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.annotation.Order;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.www.BasicAuthenticationFilter;
+
+@Configuration
+@EnableWebSecurity
+public class SecurityConfig {
+
+    private final ExternalAuthenticationProvider externalAuthenticationProvider;
+
+    public SecurityConfig(ExternalAuthenticationProvider externalAuthenticationProvider) {
+        this.externalAuthenticationProvider = externalAuthenticationProvider;
+    }
+
+    // SecurityFilterChain for Basic Auth (/v1/**)
+    @Bean
+    @Order(1)
+    public SecurityFilterChain basicAuthFilterChain(HttpSecurity http) throws Exception {
+        http
+            .securityMatcher("/v1/**") // Apply to /v1/** endpoints
+            .authorizeHttpRequests(auth -> auth
+                .anyRequest().authenticated()
+            )
+            .httpBasic(withDefaults())
+            .sessionManagement(session -> session
+                .sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+            );
+
+        return http.build();
+    }
+
+    // SecurityFilterChain for External Auth (/diag/auth/v1/**)
+    @Bean
+    @Order(2)
+    public SecurityFilterChain externalAuthFilterChain(HttpSecurity http) throws Exception {
+        http
+            .securityMatcher("/diag/auth/v1/**") // Apply to /diag/auth/v1/** endpoints
+            .authorizeHttpRequests(auth -> auth
+                .anyRequest().authenticated()
+            )
+            .sessionManagement(session -> session
+                .sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+            )
+            .authenticationProvider(externalAuthenticationProvider)
+            .addFilterBefore(new ExternalAuthFilter(), BasicAuthenticationFilter.class);
+
+        return http.build();
+    }
+}
+```
+
+---
+
+### Step 5: Create a Custom Filter for External Authentication
+
+To extract the `Authorization` header and trigger the external authentication, implement a custom filter:
+
+```java
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.web.filter.OncePerRequestFilter;
+
+import java.io.IOException;
+
+public class ExternalAuthFilter extends OncePerRequestFilter {
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
+            throws ServletException, IOException {
+        String authHeader = request.getHeader("Authorization");
+
+        if (authHeader != null && !authHeader.isEmpty()) {
+            // Create an authentication token to be processed by ExternalAuthenticationProvider
+            UsernamePasswordAuthenticationToken authToken = 
+                new UsernamePasswordAuthenticationToken(null, authHeader, null);
+            try {
+                // Authenticate using the AuthenticationManager (configured with ExternalAuthenticationProvider)
+                Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+                if (auth == null) {
+                    auth = getAuthenticationManager(request).authenticate(authToken);
+                    SecurityContextHolder.getContext().setAuthentication(auth);
+                }
+            } catch (Exception e) {
+                SecurityContextHolder.clearContext();
+                response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+                return;
+            }
+        }
+
+        filterChain.doFilter(request, response);
+    }
+}
+```
+
+---
+
+### Step 6: Example Controllers
+
+To test the setup, create sample controllers for both endpoints:
+
+```java
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class TestController {
+
+    @GetMapping("/v1/test")
+    public String basicAuthTest() {
+        return "Basic Auth endpoint accessed!";
+    }
+
+    @GetMapping("/diag/auth/v1/test")
+    public String externalAuthTest() {
+        return "External Auth endpoint accessed!";
+    }
+}
+```
+
+---
+
+### Step 7: Testing the Setup
+
+1. **Basic Auth**:
+   - Send a request to `http://localhost:8080/v1/test` with Basic Auth credentials:
+     ```
+     Authorization: Basic dXNlcjpwYXNzd29yZA==
+     ```
+     (Base64 encoded `user:password`).
+   - Expected response: `Basic Auth endpoint accessed!`.
+
+2. **External Auth**:
+   - Send a request to `http://localhost:8080/diag/auth/v1/test` with an `Authorization` header (e.g., Bearer token or custom header expected by the external service):
+     ```
+     Authorization: Bearer <token>
+     ```
+   - Ensure the external service is reachable and returns a valid response.
+   - Expected response: `External Auth endpoint accessed!`.
+
+---
+
+### Notes
+- **Password Encoding**: In production, use a proper password encoder (e.g., `BCryptPasswordEncoder`) instead of `{noop}` for Basic Auth passwords.
+- **External Service Integration**: Replace the `WebClient` logic with your actual external service's API details. Handle errors and edge cases appropriately.
+- **Asynchronous Handling**: The `WebClient` call in `ExternalAuthenticationProvider` is blocked for simplicity. In a production environment, consider handling the asynchronous nature of `WebClient` properly.
+- **Security**: Ensure the external service is secure (e.g., uses HTTPS) and validate the response thoroughly to prevent security vulnerabilities.
+- **Filter Ordering**: The `@Order` annotation ensures that the `/v1/**` filter chain is evaluated before `/diag/auth/v1/**`. Adjust as needed for other URL patterns.
+
+This setup provides a clean separation of authentication mechanisms while adhering to Spring Security best practices. Let me know if you need further clarification or additional details!
