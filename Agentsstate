@@ -1,0 +1,50 @@
+package com.example.aiagent.state;
+
+import org.bsc.langgraph4j.state.AgentState;
+import org.bsc.langgraph4j.state.Channel;
+import org.bsc.langgraph4j.state.Channels;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+public class SupportAgentState extends AgentState {
+    public static final String MESSAGES_KEY = "messages";
+    public static final String INTENT_KEY = "intent";
+    public static final String TROUBLESHOOTING_STEP_KEY = "troubleshootingStep";
+    public static final String ISSUE_RESOLVED_KEY = "issueResolved";
+    public static final String TRANSFER_TO_HUMAN_KEY = "transferToHuman";
+
+    public static final Map<String, Channel<?>> SCHEMA = Map.of(
+        MESSAGES_KEY, Channels.appender(ArrayList::new),
+        INTENT_KEY, Channels.overwrite(String.class),
+        TROUBLESHOOTING_STEP_KEY, Channels.overwrite(Integer.class, () -> 0),
+        ISSUE_RESOLVED_KEY, Channels.overwrite(Boolean.class, () -> false),
+        TRANSFER_TO_HUMAN_KEY, Channels.overwrite(Boolean.class, () -> false)
+    );
+
+    public SupportAgentState(Map<String, Object> initData) {
+        super(initData);
+    }
+
+    public List<String> messages() {
+        return this.<List<String>>value(MESSAGES_KEY).orElse(List.of());
+    }
+
+    public Optional<String> intent() {
+        return value(INTENT_KEY);
+    }
+
+    public int troubleshootingStep() {
+        return this.<Integer>value(TROUBLESHOOTING_STEP_KEY).orElse(0);
+    }
+
+    public boolean isIssueResolved() {
+        return this.<Boolean>value(ISSUE_RESOLVED_KEY).orElse(false);
+    }
+
+    public boolean isTransferToHuman() {
+        return this.<Boolean>value(TRANSFER_TO_HUMAN_KEY).orElse(false);
+    }
+}
