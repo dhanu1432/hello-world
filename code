@@ -1,0 +1,61 @@
+package com.example.multiagent.service;
+
+import com.example.multiagent.model.Checkpoint;
+import com.example.multiagent.repository.CheckpointRepository;
+import org.bsc.langgraph4j.checkpoint.CheckpointSaver;
+import org.bsc.langgraph4j.checkpoint.Checkpoint;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+@Component
+public class MongoCheckpointSaver implements CheckpointSaver {
+
+    @Autowired
+    private CheckpointRepository checkpointRepository;
+
+    @Override
+    public void save(String threadId, String checkpointId, String nodeName, Map<String, Object> state) {
+        Checkpoint checkpoint = new Checkpoint();
+        checkpoint.setId(checkpointId != null ? checkpointId : UUID.randomUUID().toString());
+        checkpoint.setThreadId(threadId);
+        checkpoint.setNodeName(nodeName);
+        checkpoint.setState(state);
+        checkpoint.setTimestamp(System.currentTimeMillis());
+        checkpointRepository.save(checkpoint);
+    }
+
+    @Override
+    public Optional<Checkpoint> load(String threadId, String checkpointId) {
+        if (checkpointId != null) {
+            return checkpointRepository.findById(checkpointId)
+                .map(this::toLangGraphCheckpoint);
+        } else {
+            // Load the latest checkpoint for the thread
+            return checkpointRepository.findFirstByThreadIdOrderByTimestampDesc(threadId)
+                .map(this::toLangGraphCheckpoint);
+        }
+    }
+
+    @Override
+    public Iterable<Checkpoint> list(String threadId) {
+        return checkpointRepository.findByThreadId(threadId).stream()
+            .map(this::toLangGraphCheckpoint)
+            .collect(Collectors.toList());
+    }
+
+    private Checkpoint toLangGraphCheckpoint(com.example.multiagent.model.Checkpoint mongoCheckpoint) {
+        return new Checkpoint(
+            mongoCheckpoint.getId(),
+            mongoCheckpoint.getThreadId(),
+            mongoCheckpoint.getNodeName(),
+            mongoCheckpoint.getState(),
+            mongoCheckpoint.getTimestamp()
+        );
+    }
+}
+
