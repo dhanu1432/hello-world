@@ -1,0 +1,28 @@
+package com.example.aiagent.persistence;
+
+import org.bsc.langgraph4j.checkpoint.BaseCheckPointSaver;
+import org.bsc.langgraph4j.checkpoint.Checkpoint;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.stereotype.Component;
+
+import java.util.Map;
+import java.util.Optional;
+
+@Component
+public class MongoDBCheckPointSaver implements BaseCheckPointSaver {
+    private final MongoTemplate mongoTemplate;
+
+    public MongoDBCheckPointSaver(MongoTemplate mongoTemplate) {
+        this.mongoTemplate = mongoTemplate;
+    }
+
+    @Override
+    public void save(String threadId, Checkpoint checkpoint) {
+        mongoTemplate.save(checkpoint, "checkpoints");
+    }
+
+    @Override
+    public Optional<Checkpoint> load(String threadId) {
+        return Optional.ofNullable(mongoTemplate.findById(threadId, Checkpoint.class, "checkpoints"));
+    }
+}
