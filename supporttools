@@ -1,0 +1,32 @@
+package com.example.aiagent.tools;
+
+import dev.langchain4j.agent.tool.Tool;
+import org.springframework.ai.document.Document;
+import org.springframework.ai.vectorstore.MongoDBVectorStore;
+import org.springframework.stereotype.Component;
+
+import java.util.List;
+import java.util.stream.Collectors;
+
+@Component
+public class SupportTools {
+    private final MongoDBVectorStore vectorStore;
+
+    public SupportTools(MongoDBVectorStore vectorStore) {
+        this.vectorStore = vectorStore;
+    }
+
+    @Tool("Check if there is a service outage")
+    public String outageCheck() {
+        // Mock implementation; replace with real outage check API
+        return "No outages detected.";
+    }
+
+    @Tool("Retrieve knowledge articles for troubleshooting")
+    public String retrieveKnowledgeArticles(String query) {
+        List<Document> documents = vectorStore.similaritySearch(query);
+        return documents.stream()
+            .map(Document::getContent)
+            .collect(Collectors.joining("\n"));
+    }
+}
