@@ -1,0 +1,125 @@
+package com.example.aiagent.graph;
+
+import com.example.aiagent.agents.SupportAgents;
+import com.example.aiagent.state.SupportAgentState;
+import org.bsc.langgraph4j.StateGraph;
+import org.bsc.langgraph4j.action.AsyncEdgeAction;
+import org.bsc.langgraph4j.checkpoint.BaseCheckPointSaver;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+
+import static org.bsc.langgraph4j.StateGraph.END;
+import static org.bsc.langgraph4j.StateGraph.START;
+import static org.bsc.langgraph4j.action.AsyncNodeAction.node_async;
+
+@Component
+public class SupportAgentGraph {
+
+    private final SupportAgents.OrchestratorAgent orchestratorAgent;
+    private final SupportAgents.CallingIssuesAgent callingIssuesAgent;
+    private final SupportAgents.InternetIssuesAgent internetIssuesAgent;
+    private final BaseCheckPointSaver checkPointSaver;
+
+    @Autowired
+    public SupportAgentGraph(
+        SupportAgents.OrchestratorAgent orchestratorAgent,
+        SupportAgents.CallingIssuesAgent callingIssuesAgent,
+        SupportAgents.InternetIssuesAgent internetIssuesAgent,
+        BaseCheckPointSaver checkPointSaver
+    ) {
+        this.orchestratorAgent = orchestratorAgent;
+        this.callingIssuesAgent = callingIssuesAgent;
+        this.internetIssuesAgent = internetIssuesAgent;
+        this.checkPointSaver = checkPointSaver;
+    }
+
+    public StateGraph<SupportAgentState> buildGraph() throws Exception {
+        StateGraph<SupportAgentState> graph = new StateGraph<>(
+            SupportAgentState.SCHEMA,
+            initData -> new SupportAgentState(initData)
+        );
+
+        // Define nodes
+        graph.addNode("orchestrator", node_async(state -> {
+            String userInput = state.messages().get(state.messages().size() - 1);
+            String memoryId = (String) state.get("memoryId");
+            String context = (String) state.get("context");
+            String response = orchestratorAgent.respond(memoryId, userInput, context);
+            return Map.of(
+                SupportAgentState.MESSAGES_KEY, response,
+                SupportAgentState.INTENT_KEY, state.intent().orElse(""),
+                SupportAgentState.TRANSFER_TO_HUMAN_KEY, state.isTransferToHuman()
+            );
+        }));
+
+        graph.addNode("callingIssues", node_async(state -> {
+            String userInput = state.messages().get(state.messages().size() - 1);
+            String memoryId = (String) state.get("memoryId");
+            String context = (String) state.get("context");
+            String response = callingIssuesAgent.respond(memoryId, userInput, context);
+            return Map.of(
+                SupportAgentState.MESSAGES_KEY, response,
+                SupportAgentState.TROUBLESHOOTING_STEP_KEY, state.troubleshootingStep() + 1,
+                SupportAgentState.ISSUE_RESOLVED_KEY, state.isIssueResolved(),
+                SupportAgentState.TRANSFER_TO_HUMAN_KEY, state.isTransferToHuman()
+            );
+        }));
+
+        graph.addNode("internetIssues", node_async(state -> {
+            String userInput = state.messages().get(state.messages().size() - 1);
+            String memoryId = (String) state.get("memoryId");
+            String context = (String) state.get("context");
+            String response = internetIssuesAgent.respond(memoryId, userInput, context);
+            return Map.of(
+                SupportAgentState.MESSAGES_KEY, response,
+                SupportAgentState.TROUBLESHOOTING_STEP_KEY, state.troubleshootingStep() + 1,
+                SupportAgentState.ISSUE_RESOLVED_KEY, state.isIssueResolved(),
+                SupportAgentState.TRANSFER_TO_HUMAN_KEY, state.isTransferToHuman()
+            );
+        }));
+
+        graph.addNode("humanTransfer", node_async(state -> {
+            return Map.of(
+                SupportAgentState.MESSAGES_KEY, "Transferring to a human agent. Please hold."
+            );
+        }));
+
+        // Define edges
+        graph.addEdge(START, "orchestrator");
+
+        // Conditional routing from orchestrator
+        graph.addConditionalEdges("orchestrator", (AsyncEdgeAction<SupportAgentState>) state -> {
+            String lastMessage = state.messages().get(state.messages().size() - 1);
+            if (lastMessage.contains("outage detected")) {
+                return END;
+            }
+            if (state.isTransferToHuman()) {
+                return "humanTransfer";
+            }
+            String intent = state.intent().orElse("");
+            if (intent.equalsIgnoreCase("calling")) {
+                return "callingIssues";
+            } else if (intent.equalsIgnoreCase("internet")) {
+                return "internetIssues";
+            }
+            return "orchestrator"; // Loop back to ask for clarification
+        });
+
+        // Conditional routing from troubleshooting agents
+        AsyncEdgeAction<SupportAgentState> troubleshootingEdge = state -> {
+            if (state.isTransferToHuman() || state.troubleshootingStep() >= 3) {
+                return "humanTransfer";
+            }
+            if (state.isIssueResolved()) {
+                return END;
+            }
+            return state.intent().orElse("").equalsIgnoreCase("calling") ? "callingIssues" : "internetIssues";
+        };
+
+        graph.addConditionalEdges("callingIssues", troubleshootingEdge);
+        graph.addConditionalEdges("internetIssues", troubleshootingEdge);
+        graph.addEdge("humanTransfer", END);
+
+        return graph.compile(checkPointSaver);
+    }
+}
