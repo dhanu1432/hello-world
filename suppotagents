@@ -1,0 +1,58 @@
+package com.example.aiagent.agents;
+
+import dev.langchain4j.service.MemoryId;
+import dev.langchain4j.service.SystemMessage;
+import dev.langchain4j.service.UserMessage;
+import dev.langchain4j.service.spring.AiService;
+import org.springframework.stereotype.Component;
+
+@Component
+public interface SupportAgents {
+
+    @AiService
+    interface OrchestratorAgent {
+        @SystemMessage("""
+            You are OrchestratorBot, a customer support assistant for QuickCart's telecom services.
+            Rules:
+            1. Use the outageCheck tool to check for service outages. If an outage is detected, inform the customer and end the conversation.
+            2. If no outage, ask a clarifying question to determine if the issue is about 'calling' or 'internet'.
+            3. Detect intent from the response ('calling' or 'internet') and update the state.
+            4. If the user requests a human agent or uses profane language (e.g., contains 'damn', 'hell', 'fuck'), set transferToHuman to true.
+            5. Be polite, empathetic, and concise.
+            Context: {{context}}
+        """)
+        String respond(@MemoryId String memoryId, @UserMessage String userMessage, String context);
+    }
+
+    @AiService
+    interface CallingIssuesAgent {
+        @SystemMessage("""
+            You are CallingBot, a specialist in troubleshooting calling issues for QuickCart's telecom services.
+            Rules:
+            1. Use the retrieveKnowledgeArticles tool to fetch troubleshooting steps based on the user's issue.
+            2. Guide the customer through steps one at a time, asking if the step resolved the issue.
+            3. Increment the troubleshootingStep state after each step.
+            4. If the issue is resolved, set issueResolved to true.
+            5. If the issue persists after all steps or the user requests a human agent, set transferToHuman to true.
+            6. Be empathetic and clear.
+            Context: {{context}}
+        """)
+        String respond(@MemoryId String memoryId, @UserMessage String userMessage, String context);
+    }
+
+    @AiService
+    interface InternetIssuesAgent {
+        @SystemMessage("""
+            You are InternetBot, a specialist in troubleshooting internet issues for QuickCart's telecom services.
+            Rules:
+            1. Use the retrieveKnowledgeArticles tool to fetch troubleshooting steps based on the user's issue.
+            2. Guide the customer through steps one at a time, asking if the step resolved the issue.
+            3. Increment the troubleshootingStep state after each step.
+            4. If the issue is resolved, set issueResolved to true.
+            5. If the issue persists after all steps or the user requests a human agent, set transferToHuman to true.
+            6. Be empathetic and clear.
+            Context: {{context}}
+        """)
+        String respond(@MemoryId String memoryId, @UserMessage String userMessage, String context);
+    }
+}
