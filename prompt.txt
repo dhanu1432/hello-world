@@ -1,0 +1,97 @@
+Prompt 
+
+You are a senior software architect who excels at building no-code and low-code systems with HTML, JavaScript, and Web APIs.
+
+Task
+Design a fully working interactive tool based on this idea:
+[DESCRIBE YOUR TOOL IDEA]
+
+Deliverables
+1. A plain-English explanation of how the tool works.
+2. A step-by-step plan to implement it with Grok or a no-code platform.
+3. Exact HTML/CSS/JS code if relevant.
+4. UX and design improvement tips.
+5. Instructions to generate a shareable, embed-ready version.
+
+Imagine you are shipping an MVP for a startup demo.
+
+https://github.com/x1xhlol/system-prompts-and-models-of-ai-tools?tab=readme-ov-file
+
+You are an expert Software Developer proficient in Object Oriented Programming/Analysis. Your job is to provide a design and skeleton code so that the design can be reused by multiple teams without rewriting lot of code. You need to follow the Software Design patterns by Gang of Four and adhere to SOLID design principles while creating the design and code. We are using ChatGPT to come up with answers along with Mongo Vector Store for storing all the Knowledge Management articles that described the steps for troubleshooting every flow.
+
+Requirements:
+1. Input from client: flow Identifier such as can’t call.
+
+Provide me code. The design should be in such a way, any other team should be able to reuse the design. for example, they should be able to implement the interfaces and extend bases classes and abstract classes to to achieve their goals.
+The application we are building is a spring boot and spring ai application with mongodb atlas as a vector store and primary database to store all the context info, session info etc, chat history etc. The application handles wireless troubleshooting issues for Cell phone customers. For example - the flows can be for can’t make calls, can’t receive calls, dropped calls, wifi calling issues etc.
+1. Client can call me with a flow identifier name, for example- cant_make_calls
+2. I am going to have
+
+
+I'm using Spring boot and Spring AI version 1.0.0-M6 to build my application. I want to build Prompts dynamically from a template by reading from mongodb.
+I want to read context from mongodb atlas vector store and use that as context in the prompt so LLM can prepare answer from this context.
+Design and code this so that prompt can be built dynamically by any application. Use Spring AI java classes where applicable.
+Also implement reading from vectorstore by performing similarity search. define interfaces and make classes abstract where applicable and make code modular.
+
+
+Make these changes:
+1. Use only gradle, not maven
+2. Change the search to work with different collections in Mongo Vector database.
+3. Add filter expression ability
+4. Make similarityThreshold and topK configurable
+5. Create another class called StaticContextRetriever from a mongo collection that stores static context with a key called flowIdentifier. User should be able to use context data from static context retriever or vector search. If vector store query fails , should fall back and use static text as context while building prompt. Implement all of this. Add code to customize SearchRequest with params like similarityThreshold and topk.
+6. I do see getFormattedContent and getText fields in Document class. Use these if applicable.
+
+Just like VectorStore, can we define a KnowledgeStore interface that deals with Mongo collections with static knoweldge. This is nothing but a mongo collection. Each team or Use case can have their own Vector Stores and Knowledge Stores that can by dynamically used to retrieve context and build prompt. When a team wants to build their own knowledge store with their own collection, it should be simple without changing much underlying code. User input can be a flowIdentifier like “not_able_to_call” or a raw interactive text like “I can’t make phone calls”. I should have the ability to build prompts using any VectorStore or any knowledge store and any prompt template. I want to hide the implementation details from the people that are developing flows and prompts.
+
+——————————
+
+Give me Java/Spring Boot design and code for AI multi Agent who can coordinate to troubleshoot Mobile call issues, text issues, browsing issues. The design should cover all the functions of an agent and should be able to maintain state, should be able to resume previous sessions, should be able to improve over time. Agent should be able to read troubleshooting steps from mongo db and use those as guiding principles for helping with troubleshooting. Agent should also be able to take a fixed number of steps and run them. Agent should be able to jump from one issue to another as per User input. There should be a Supervisor agent that can orchestrate multiple agents. and respond to user accordingly. Design should be extensible to create Agents for multiple functionalities and modular. This should be a spring boot app with gradle.
+
+https://towardsdatascience.com/how-i-won-singapores-gpt-4-prompt-engineering-competition-34c195a93d41
+
+￼
+￼
+￼
+￼
+
+Copy & Paste These 15 ChatGPT Prompts to Learn Any Complex Topic 10x Faster:
+
+￼
+￼
+￼
+￼
+￼
+￼
+￼
+
+1. The Meta-Prompt
+
+Copy this into ChatGPT:
+
+“You are to act as my prompt engineer. I would like to accomplish: [insert your goal].
+Please repeat this back to me in your own words, and ask clarifying questions.
+Once we confirm, generate the final optimized prompt.”
+
+That’s it. This turns ChatGPT into your personal prompt engineer.
+
+Prompt 1 - Complex Topic Decoder
+
+Break down [Difficult Subject] into 5 core principles. Use real-world metaphors for each. Create mini-challenges to test understanding. Build a 7-day mastery path with quick-win milestones. Include "clarity score" after each mini-test. My learning goal: [Learning Goal].
+
+Prompt 2 - Learning Acceleration Blueprint
+
+Design 21-day rapid learning system for [Topic]. Structure into morning theory, afternoon practice, evening review. Create dopamine-triggering rewards for each milestone. Include focus-state triggers and retention measurements. My available time: [Study Time].
+
+Prompt 3 - Knowledge Web Builder
+
+Transform [Topic] into an interconnected concept map. Create memory hooks linking new information to existing knowledge. Design a 5-minute daily review system. Include understanding depth score. Generate quick recall patterns. My current knowledge: [Current Level].
+
+Prompt 4 - Book Mastery System
+
+Extract core principles from [Book]. Create action-focused summary with implementation steps. Design a 30-day practice plan for key concepts. Include knowledge application score. Generate real-world testing scenarios. My learning focus: [Book Topic].
+
+Prompt 4 - Book Mastery System
+
+Extract core principles from [Book]. Create action-focused summary with implementation steps. Design a 30-day practice plan for key concepts. Include knowledge application score. Generate real-world testing scenarios. My learning focus: [Book Topic].
+
