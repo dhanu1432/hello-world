@@ -1,0 +1,259 @@
+package com.example;
+
+import io.javelit.core.Jt;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.net.URI;
+import java.util.List;
+
+public class App {
+    public static void main(String[] args) {
+        Jt.title("DaaS Reference UI using Javelit").use();
+
+        // DaaS Reference UI Fields
+        var daasCols = Jt.columns(4).use();
+
+        String customerType = Jt.selectbox("Customer type:", List.of("Broadband", "Mobility"))
+                .width(150)
+                .use(daasCols.col(0));
+
+        String ban = Jt.textInput("BAN:")
+                .width(150)
+                .use(daasCols.col(1));
+
+        String flowIdentifier = Jt.textInput("flowIdentifier:")
+                .width(150)
+                .use(daasCols.col(2));
+
+        String clientApp = Jt.selectbox("clientApp:", List.of("IDP", "CCAI", "IVR"))
+                .width(150)
+                .use(daasCols.col(3));
+
+        // User Input Line
+        String userInput = Jt.textInput("User input:")
+                .width(300)
+                .use();
+
+        // Buttons Line
+        var btnCols = Jt.columns(3).use();
+
+        // State Management
+        var session = Jt.sessionState();
+
+        // Button Logic
+        if (Jt.button("Engage").use(btnCols.col(0))) {
+            try {
+                // Construct Request Body
+                String requestBody = String.format("{\"ban\": \"%s\", \"flowIdentifier\": \"%s\"}",
+                        ban != null ? ban : "",
+                        flowIdentifier != null ? flowIdentifier : "");
+
+                HttpClient client = HttpClient.newHttpClient();
+                HttpRequest request = HttpRequest.newBuilder()
+                        .uri(URI.create("https://jsonplaceholder.typicode.com/todos")) // Changed to POST friendly
+                                                                                       // endpoint
+                        .header("Content-Type", "application/json")
+                        .header("clientApp", clientApp != null ? clientApp : "")
+                        .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                        .build();
+
+                HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+
+                session.put("requestBody", requestBody);
+                session.put("apiResponse", response.body());
+                session.put("cardType", "cat");
+            } catch (Exception e) {
+                session.put("requestBody", "Error constructing request");
+                session.put("apiResponse", "Error: " + e.getMessage());
+            }
+        }
+
+        if (Jt.button("Next").use(btnCols.col(1))) {
+            try {
+                // Construct Request Body
+                String requestBody = String.format("{\"userInput\": \"%s\"}",
+                        userInput != null ? userInput : "");
+
+                HttpClient client = HttpClient.newHttpClient();
+                HttpRequest request = HttpRequest.newBuilder()
+                        .uri(URI.create("https://jsonplaceholder.typicode.com/users")) // Changed to POST friendly
+                                                                                       // endpoint
+                        .header("Content-Type", "application/json")
+                        .header("clientApp", clientApp != null ? clientApp : "")
+                        .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                        .build();
+
+                HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+
+                session.put("requestBody", requestBody);
+                session.put("apiResponse", response.body());
+                session.put("cardType", "dog");
+            } catch (Exception e) {
+                session.put("requestBody", "Error constructing request");
+                session.put("apiResponse", "Error: " + e.getMessage());
+            }
+        }
+
+        if (Jt.button("Reset").use(btnCols.col(2))) {
+            session.remove("requestBody");
+            session.remove("apiResponse");
+            session.remove("cardType");
+        }
+
+        Jt.divider().use();
+
+        // Bottom Section: Display API Response and Adaptive Card
+        String savedRequestBody = session.getString("requestBody");
+        String apiResponse = session.getString("apiResponse");
+        String cardType = session.getString("cardType");
+
+        if (apiResponse != null) {
+            var bottomCols = Jt.columns(2).use();
+
+            // Left Column: Request & Response
+            var leftCol = bottomCols.col(0);
+
+            if (savedRequestBody != null) {
+                Jt.text("Request Body:").use(leftCol);
+                Jt.code(savedRequestBody).use(leftCol);
+                Jt.text("Response Body:").use(leftCol);
+            }
+
+            Jt.code(apiResponse).use(leftCol);
+
+            // Right Column: Adaptive Card
+            if (cardType != null) {
+                String cardJson = getCardJson(cardType);
+                Jt.html(renderAdaptiveCard(cardJson)).use(bottomCols.col(1));
+            }
+        }
+    }
+
+    private static String getCardJson(String type) {
+        if ("dog".equals(type)) {
+            return """
+                    {
+                        "type": "AdaptiveCard",
+                        "version": "1.0",
+                        "body": [
+                            { "type": "TextBlock", "size": "Medium", "weight": "Bolder", "text": "Next Action: User Profile" },
+                            { "type": "TextBlock", "text": "Here is the user profile data fetched from the API.", "wrap": true },
+                            { "type": "Image", "url": "https://adaptivecards.io/content/cats/2.png", "size": "Medium" }
+                        ],
+                        "actions": [ { "type": "Action.OpenUrl", "title": "View User", "url": "https://jsonplaceholder.typicode.com/users/1" } ]
+                    }
+                    """;
+        }
+        // Default / Cat / Engage
+        return """
+                {
+                    "type": "AdaptiveCard",
+                    "version": "1.0",
+                    "body": [
+                        { "type": "TextBlock", "size": "Medium", "weight": "Bolder", "text": "Engage Action: Todo Item" },
+                        { "type": "TextBlock", "text": "We successfully fetched the todo item.", "wrap": true },
+                        { "type": "Image", "url": "https://adaptivecards.io/content/cats/1.png", "size": "Medium" }
+                    ],
+                    "actions": [ { "type": "Action.OpenUrl", "title": "View Todo", "url": "https://jsonplaceholder.typicode.com/todos/1" } ]
+                }
+                """;
+    }
+
+    private static String renderAdaptiveCard(String json) {
+        try {
+            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+            com.fasterxml.jackson.databind.JsonNode root = mapper.readTree(json);
+
+            StringBuilder html = new StringBuilder();
+            html.append(
+                    "<div style='border: 1px solid #e1dfdd; border-radius: 4px; padding: 20px; font-family: \"Segoe UI\", sans-serif; background: white; max-width: 500px;'>");
+
+            if (root.has("body")) {
+                for (com.fasterxml.jackson.databind.JsonNode item : root.get("body")) {
+                    String type = item.has("type") ? item.get("type").asText() : "";
+
+                    if ("TextBlock".equals(type)) {
+                        String text = item.has("text") ? item.get("text").asText() : "";
+                        String size = item.has("size") ? item.get("size").asText() : "Default";
+                        String weight = item.has("weight") ? item.get("weight").asText() : "Default";
+
+                        String style = "margin-bottom: 8px;";
+                        if ("Medium".equals(size))
+                            style += "font-size: 16px;";
+                        else if ("Large".equals(size))
+                            style += "font-size: 20px;";
+                        else
+                            style += "font-size: 14px;";
+
+                        if ("Bolder".equals(weight))
+                            style += "font-weight: 600;";
+
+                        html.append("<div style='" + style + "'>").append(text).append("</div>");
+                    } else if ("Image".equals(type)) {
+                        String url = item.has("url") ? item.get("url").asText() : "";
+                        html.append("<img src='").append(url).append(
+                                "' style='width: 100%; height: auto; margin-top: 10px; border-radius: 4px;' />");
+                    }
+                }
+            }
+
+            if (root.has("actions")) {
+                html.append("<div style='margin-top: 20px; display: flex; gap: 10px;'>");
+                for (com.fasterxml.jackson.databind.JsonNode action : root.get("actions")) {
+                    String title = action.has("title") ? action.get("title").asText() : "Action";
+                    String url = action.has("url") ? action.get("url").asText() : "#";
+
+                    html.append("<a href='").append(url).append(
+                            "' target='_blank' style='text-decoration: none; background-color: #0078D4; color: white; padding: 10px 20px; border-radius: 4px; font-size: 14px; display: inline-block;'>")
+                            .append(title)
+                            .append("</a>");
+                }
+                html.append("</div>");
+            }
+
+            html.append("</div>");
+            return html.toString();
+
+        } catch (Exception e) {
+            return "<div style='color: red; padding: 10px; border: 1px solid red;'>Error rendering server-side: "
+                    + e.getMessage() + "</div>";
+        }
+    }
+}
+-----
+~/…/javelit_demo $ mvn clean compile exec:exec -Dexec.executable=java -Dexec.args="-cp %classpath io.javelit.cli.Cli run src/main/java/com/example/App.java"
+-------
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.example</groupId>
+    <artifactId>javelit-demo</artifactId>
+    <version>1.0-SNAPSHOT</version>
+
+    <properties>
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.javelit</groupId>
+            <artifactId>javelit</artifactId> <!-- Trying javelit-core as it is common, or I'll check error -->
+            <version>0.75.0</version>
+        </dependency>
+        <dependency>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-classic</artifactId>
+            <version>1.5.12</version>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>2.18.2</version>
+        </dependency>
+    </dependencies>
+</project>
+--------------------
