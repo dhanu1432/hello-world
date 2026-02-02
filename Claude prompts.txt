@@ -1,0 +1,356 @@
+X claude code prompts
+AI Edge (@aiedge_)
+74 likes · 4 replies
+10. The "Build Me an App From Scratch" Prompt
+
+I want you to help me build an app. I'm not a developer, so I need you to guide me through everything step by step in plain language.
+
+Here's what I want to build:
+[Describe your app idea in your own words - what it does, who it's for, what problem it solves]
+
+Before you write any code, I need you to:
+
+1. **Clarify** — Ask me questions to make sure you fully understand what I want. Don't assume anything.
+
+2. **Propose a plan** — Explain in simple terms:
+   - What you're going to build
+   - What technologies you'll use and why (keep it simple)
+   - What the finished product will look like
+   - Any limitations I should know about
+
+3. **Get my approval** — Wait for me to say "go ahead" before you start building.
+
+When you build:
+- Work in small chunks and explain what each part does
+- Test as you go and fix any issues
+- Tell me when you need me to do something (like install a tool or make a decision)
+
+When you're done:
+- Show me how to run the app
+- Explain how to use it
+- Tell me how to make simple changes myself later if I want to
+
+Talk to me like a helpful friend, not a technical manual.
+
+9. Elite Code Debugging  
+
+I have a project that isn't working and I need your help fixing it. I'm not a developer, so please explain everything in plain language.
+
+Here's my situation:
+[Describe what you're trying to run, where you got it from, and what's happening when it breaks]
+
+Here's the error message I'm seeing (if any):
+[Paste any error messages here]
+
+Before you start fixing things, I need you to:
+
+1. **Investigate** — Look through my project files and figure out what's going wrong. Don't make changes yet.
+
+2. **Explain the problem** — Tell me in simple terms:
+   - What's broken and why
+   - What caused it (if you can tell)
+   - How confident you are in your diagnosis
+
+3. **Propose a fix** — Explain what you're going to do to fix it and why. If there are multiple options, give me the safest/simplest one first.
+
+4. **Wait for my go-ahead** — Don't change anything until I approve.
+
+When you fix it:
+- Make one change at a time
+- Test after each change
+- Tell me what you did and whether it worked
+- If something doesn't work, undo it and try a different approach
+
+Once it's working:
+- Explain what was wrong so I can avoid it next time
+- Let me know if there are other issues I should be aware of
+
+Be patient with me — I might ask "dumb" questions, and that's okay.
+
+8. Automate ANY Annoying Desktop Task
+
+I have a repetitive task I do on my computer and I want you to automate it for me. I'm not a developer, so I need you to handle everything and explain it simply.
+
+Here's the task I want to automate:
+[Describe what you do manually — be specific about the steps you take, where your files are, what the end result looks like]
+
+How often I do this:
+[Daily / Weekly / Whenever X happens / etc.]
+
+Before you build anything:
+
+1. **Repeat it back to me** — Describe what you think I'm asking for in your own words so I can confirm you've got it right.
+
+2. **Ask clarifying questions** — What else do you need to know? Don't guess on important details like file locations, naming conventions, or edge cases.
+
+3. **Propose your approach** — Tell me in plain language:
+   - What you're going to build
+   - How it will work
+   - What I'll need to do to run it (the simpler the better)
+   - Any limitations or things it won't handle
+
+4. **Wait for my approval** — Don't start building until I say go.
+
+When you build it:
+- Keep it as simple as possible
+- Add comments explaining what each part does (in case I want to tweak it later)
+- Test it with a small example first before running it on everything
+
+When you're done, give me:
+- Clear instructions on how to run it
+- How to customize it if my needs change slightly
+- What to check if something goes wrong
+
+Assume I've never run a script before. Walk me through it like I'm brand new to this.
+
+7. Prompt Builder (Claude Code specific)
+
+I want you to help me create a reusable prompt for Claude Code. I'm not sure how to write prompts that get good results, so I need you to interview me and build one for me.
+
+Here's roughly what I want to use Claude Code for:
+[Describe the type of task in your own words — doesn't need to be detailed yet]
+
+Before you write the prompt:
+
+1. **Interview me** — Ask me questions one or two at a time to understand:
+   - What I'm actually trying to accomplish
+   - My skill level (total beginner, some experience, etc.)
+   - How I want Claude Code to communicate with me
+   - Any specific requirements or preferences I have
+   - How reusable I need this prompt to be (one-time vs. something I'll use often)
+
+2. **Identify the type of task** — Tell me what category this falls into (building something, fixing something, automating something, learning, etc.) and whether there are proven approaches for this kind of prompt.
+
+3. **Draft the prompt** — Write a first version and explain why you structured it the way you did.
+
+4. **Get my feedback** — Ask me what I'd change, what's missing, or what feels off. Revise until I'm happy.
+
+The final prompt should:
+- Be copy-paste ready
+- Have clear placeholders [like this] for the parts I'll fill in each time
+- Include instructions that get Claude Code to work the way I prefer
+- Be written in plain language I can easily understand and tweak later
+
+Don't rush this. A good prompt saves me hours later.
+
+6. Add ANY Feature to my Project
+
+I have a working project and I want to add a new feature to it. I'm not a developer, so I need you to handle the code and explain things in plain language.
+
+Here's what my project currently does:
+[Describe your project briefly — what it is, what it does now]
+
+Here's the feature I want to add:
+[Describe what you want the new feature to do — be as specific as you can]
+
+Before you touch anything:
+
+1. **Explore my project** — Look through my files and understand how things are currently built. Don't make any changes yet.
+
+2. **Confirm you understand** — Tell me in simple terms:
+   - How my project is currently structured
+   - Where the new feature would fit in
+   - What files you'll need to modify or create
+
+3. **Flag any concerns** — Let me know if:
+   - The feature might break something that already works
+   - My project needs cleanup before adding this
+   - The feature is more complex than I might realize
+   - There's a simpler version we could start with
+
+4. **Propose your plan** — Walk me through:
+   - What you're going to build
+   - The steps you'll take (in order)
+   - What it will look like when it's done
+
+5. **Wait for my approval** — Don't start until I say go.
+
+When you build:
+- Make small changes and test after each one
+- If something breaks, stop and tell me before continuing
+- Explain what you're doing as you go
+
+When you're done:
+- Show me how to use the new feature
+- Point out anything I should know about maintaining it
+- Let me know if there are related improvements we could make next
+
+Treat my existing project with care — I don't want to break what's already working.
+
+5. Hosting Prompt 
+Use this to convert a local project into something others can publicly access
+
+I have a project that works on my computer and I want to put it online so other people can use it. I'm not a developer, so I need you to handle the technical parts and walk me through anything I need to do.
+
+Here's what my project is:
+[Describe your project — what it does, what type it is if you know (website, web app, API, tool, etc.)]
+
+What I want:
+[A public link anyone can access / A private link I can share with specific people / Something else]
+
+Before you do anything:
+
+1. **Check my project** — Look through my files and make sure it's ready to be deployed. Tell me if anything needs to be fixed or changed first.
+
+2. **Recommend a hosting option** — Explain in plain language:
+   - Where you think I should deploy this and why
+   - Whether it's free or paid (and roughly how much)
+   - Any tradeoffs I should know about
+   - What I'll need to sign up for (accounts, services, etc.)
+
+3. **Outline the steps** — Walk me through what's going to happen before you start. I want to understand the process, not just watch it happen.
+
+4. **Wait for my go-ahead** — Don't start deploying until I approve the plan.
+
+When you deploy:
+- Tell me when you need me to do something (create an account, click a link, verify something)
+- Explain any credentials or keys I need to save
+- Test that it actually works before saying we're done
+
+When it's live, give me:
+- The link to access my project
+- How to check if it's still running
+- How to update it when I make changes
+- How to take it down if I need to
+- Any costs I should expect or watch out for
+
+Assume I've never deployed anything before. No step is too obvious to explain.
+
+4. Security Audit 
+
+I want you to check my project for security problems. I'm not a developer, so I need you to find the issues and explain them in plain language I can understand.
+
+Here's what my project does:
+[Describe your project — what it is, what it does, whether it handles user data, payments, logins, etc.]
+
+Where my project runs:
+[On my computer only / Online where others can access it / Both / I'm not sure]
+
+Before you start:
+
+1. **Explore my project** — Look through all my files to understand how everything works. Don't change anything yet.
+
+2. **Ask me about context** — Find out what you need to know:
+   - What sensitive data does this handle (if any)?
+   - Who has access to this?
+   - Is this just for me or will others use it?
+   - Am I storing any passwords, keys, or personal information?
+
+Then audit for these issues:
+
+1. **Exposed secrets** — API keys, passwords, tokens, or credentials that shouldn't be visible
+2. **Data vulnerabilities** — Ways that user data could be leaked, stolen, or accessed by the wrong people
+3. **Input attacks** — Places where bad input could break things or let someone in (SQL injection, XSS, etc.)
+4. **Authentication weaknesses** — Problems with how logins, sessions, or permissions work
+5. **Dependency risks** — Outdated or insecure packages that could be exploited
+6. **Configuration mistakes** — Settings that leave doors open unnecessarily
+
+Give me your findings like this:
+
+1. **Executive summary** — Overall security health in 2-3 sentences. How worried should I be?
+
+3. The "Make This Work Offline" Prompt
+
+I have a web app or tool that only works when I'm connected to the internet. I want you to modify it so it works offline too. I'm not a developer, so explain everything in plain language.
+
+Here's what my project does:
+[Describe your app — what it is, what it does, what features it has]
+
+How I use it:
+[On my phone / In a browser / On my desktop / etc.]
+
+What I need to work offline:
+[Everything / Just certain features / Specific parts like: viewing data, adding entries, basic functions, etc.]
+
+Before you start:
+
+1. **Explore my project** — Look through my files and understand how it currently works, especially what relies on being online.
+
+2. **Tell me what's possible** — Explain in simple terms:
+   - What can realistically work offline
+   - What will always need internet (and why)
+   - How data will be handled when I'm offline vs. online
+
+3. **Explain the approach** — Tell me:
+   - How the offline version will store data locally
+   - What happens when I go back online (does it sync automatically, do I need to do something, could there be conflicts?)
+   - Any limitations I should expect
+
+4. **Flag potential issues** — Let me know if:
+   - Some features might behave differently offline
+   - There's a risk of losing data or creating duplicates
+   - The offline version will be more limited than I might expect
+
+5. **Wait for my approval** — Don't change anything until I understand and agree to the plan.
+
+When you build it:
+- Make changes in small steps and test each one
+- Show me how to test that offline mode actually works
+- Explain what you're doing as you go
+
+When you're done, give me:
+- How to use the app when I'm offline
+- How syncing works when I reconnect
+- What to do if something goes wrong (conflicts, failed syncs, etc.)
+- Any new limitations I need to know about
+
+Make sure I don't lose any data in the process. That's my biggest concern.
+
+2. Habit Tracker App
+
+I want you to build me a personal habit tracker. I'm not a developer, so handle all the technical stuff and explain things in plain language.
+
+Here are the habits I want to track:
+[List your habits — e.g., drink water, exercise, read, meditate, take medication, etc.]
+
+How I want to track them:
+[Daily / Some daily, some weekly / Certain days only / etc.]
+
+Where I'll use this:
+[On my phone / On my computer / Both / etc.]
+
+Features I care about:
+
+Must have:
+- [ ] Simple way to mark habits complete
+- [ ] See my current streaks
+- [ ] View my history
+
+Nice to have (check any that matter to you):
+- [ ] Reminders or notifications
+- [ ] Weekly or monthly summary
+- [ ] Visual progress (charts, graphs, calendars)
+- [ ] Different habits for different days
+- [ ] Notes or mood tracking alongside habits
+- [ ] Export my data
+- [ ] Multiple habit categories
+- [ ] Dark mode
+- [ ] Other: [describe]
+
+Before you build:
+
+1. **Confirm what I need** — Repeat back what you're going to build so I know we're on the same page. Ask me questions if anything is unclear.
+
+2. **Propose how it will work** — Tell me in simple terms:
+   - What it will look like
+   - How I'll use it day to day
+   - Where my data will be stored
+   - Whether I can access it from multiple devices
+
+3. **Keep it simple** — Start with the essentials. We can add more features later. I'd rather have something clean that works than something complicated I won't use.
+
+4. **Wait for my approval** — Don't start building until I say the plan sounds right.
+
+When you build:
+- Show me progress as you go
+- Let me give feedback early so we don't have to redo things
+- Test it before calling it done
+
+When it's finished, give me:
+- How to use it (the basics)
+- How to add or change habits later
+- How my data is saved (and how to back it up)
+- Ideas for features we could add next if I want
+
+Make it something I'll actually want to open every day.
+For an in-depth, step-by-step guide on how I built a life-changing habit tracker with Claude, see this
