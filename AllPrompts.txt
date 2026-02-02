@@ -1,0 +1,813 @@
+Prompt 
+Google, openai, anthropic prompts 
+
+Technique 1: Role-Based Constraint Prompting
+
+The expert don't just ask AI to "write code." They assign expert roles with specific constraints.
+
+Template:
+
+You are a [specific role] with [X years] experience in [domain].
+Your task: [specific task]
+Constraints: [list 3-5 specific limitations]
+Output format: [exact format needed]
+
+---
+
+Example:
+
+You are a senior Python engineer with 10 years in data pipeline optimization.
+Your task: Build a real-time ETL pipeline for 10M records/hour
+Constraints:
+- Must use Apache Kafka
+- Maximum 2GB memory footprint
+- Sub-100ms latency
+- Zero data loss tolerance
+Output format: Production-ready code with inline documentation
+
+---
+
+This gets you 10x more specific outputs than "write me an ETL pipeline."
+
+Watch the OpenAI demo of GPT-5 and see how they were prompting ChatGPT... you will get the idea.
+
+Technique 2: Chain-of-Verification (CoVe)
+
+Google's research team uses this to eliminate hallucinations.
+
+The model generates an answer, then generates verification questions, answers them, and refines the original response.
+
+Template:
+
+Task: [your question]
+
+Step 1: Provide your initial answer
+Step 2: Generate 5 verification questions that would expose errors in your answer
+Step 3: Answer each verification question
+Step 4: Provide your final, corrected answer based on verification
+
+---
+
+Example:
+
+Task: Explain how transformers handle long-context windows
+
+Step 1: Provide your initial answer
+Step 2: Generate 5 verification questions that would expose errors in your answer
+Step 3: Answer each verification question
+Step 4: Provide your final, corrected answer based on verification
+
+---
+
+Accuracy jumps from 60% to 92% on complex technical queries.
+
+Technique 3: Few-Shot with Negative Examples
+
+Anthropic discovered that showing the model what NOT to do is as powerful as showing what TO do.
+
+Template:
+
+I need you to [task]. Here are examples:
+
+✅ GOOD Example 1: [example]
+✅ GOOD Example 2: [example]
+
+❌ BAD Example 1: [example]
+Why it's bad: [reason]
+❌ BAD Example 2: [example]
+Why it's bad: [reason]
+
+Now complete: [your actual task]
+
+---
+
+Example:
+
+I need you to write cold email subject lines. Here are examples:
+
+✅ GOOD: "Quick question about your Q4 engineering roadmap"
+✅ GOOD: "Saw your post on distributed systems—thoughts on this?"
+
+❌ BAD: "URGENT: Limited Time Offer Inside!!!"
+Why it's bad: Spam trigger words, fake urgency
+❌ BAD: "You won't believe what we built..."
+Why it's bad: Clickbait, no context
+
+Now write 5 subject lines for: SaaS tool that reduces cloud costs by 40%
+
+---
+
+This eliminates 80% of generic AI responses.
+
+Technique 4: Structured Thinking Protocol
+
+OpenAI's GPT-5 team uses this for complex reasoning tasks.
+
+Force the model to think in layers before responding.
+
+Template:
+
+Before answering, complete these steps:
+
+[UNDERSTAND]
+- Restate the problem in your own words
+- Identify what's actually being asked
+
+[ANALYZE]
+- Break down into sub-components
+- Note any assumptions or constraints
+
+[STRATEGIZE]
+- Outline 2-3 potential approaches
+- Evaluate trade-offs
+
+[EXECUTE]
+- Provide your final answer
+- Explain your reasoning
+
+Question: [your question]
+
+---
+
+Example:
+
+Before answering, complete these steps:
+
+[UNDERSTAND]
+- Restate the problem in your own words
+- Identify what's actually being asked
+
+[ANALYZE]
+- Break down into sub-components
+- Note any assumptions or constraints
+
+[STRATEGIZE]
+- Outline 2-3 potential approaches
+- Evaluate trade-offs
+
+[EXECUTE]
+- Provide your final answer
+- Explain your reasoning
+
+Question: Should I use microservices or monolith for a 5-person startup building a B2B SaaS with 1000 expected users in year one?
+
+---
+
+Produces answers that consider context instead of regurgitating best practices.
+
+Technique 5: Confidence-Weighted Prompting
+
+Google DeepMind uses this for high-stakes decisions.
+
+Ask the model to rate its confidence and provide alternative answers.
+
+Template:
+
+Answer this question: [question]
+
+For your answer, provide:
+1. Your primary answer
+2. Confidence level (0-100%)
+3. Key assumptions you're making
+4. What would change your answer
+5. Alternative answer if you're <80% confident
+
+---
+
+Example:
+
+Answer this question: Will Rust replace C++ in systems programming by 2030?
+
+For your answer, provide:
+1. Your primary answer
+2. Confidence level (0-100%)
+3. Key assumptions you're making
+4. What would change your answer
+5. Alternative answer if you're <80% confident
+
+---
+
+Stops you from making decisions based on AI bullshit confidence.
+
+Technique 6: Context Injection with Boundaries
+
+Anthropic engineers inject massive context but set clear boundaries on what matters.
+
+Template:
+
+[CONTEXT]
+[paste your documentation, code, research paper]
+
+[FOCUS]
+Only use information from CONTEXT to answer. If the answer isn't in CONTEXT, say "Insufficient information in provided context."
+
+[TASK]
+[your specific question]
+
+[CONSTRAINTS]
+- Cite specific sections when referencing CONTEXT
+- Do not use general knowledge outside CONTEXT
+- If multiple interpretations exist, list all
+
+---
+
+Example:
+
+[CONTEXT]
+[paste your company's 50-page API documentation]
+
+[FOCUS]
+Only use information from CONTEXT to answer. If the answer isn't in CONTEXT, say "Insufficient information in provided context."
+
+[TASK]
+How do I implement rate limiting with retry logic for the /users endpoint?
+
+[CONSTRAINTS]
+- Cite specific sections when referencing CONTEXT
+- Do not use general knowledge outside CONTEXT
+- If multiple interpretations exist, list all
+
+---
+
+Eliminates hallucinations when working with proprietary systems.
+
+Technique 7: Iterative Refinement Loop
+
+OpenAI's research team chains prompts to refine outputs through multiple passes.
+
+Template:
+
+[ITERATION 1]
+Create a [draft/outline/initial version] of [task]
+
+[ITERATION 2]
+Review the above output. Identify 3 weaknesses or gaps.
+
+[ITERATION 3]
+Rewrite the output addressing all identified weaknesses.
+
+[ITERATION 4]
+Final review: Is this production-ready? If not, what's missing?
+
+---
+
+Example:
+
+[ITERATION 1]
+Create a draft sales email for reaching out to engineering VPs at Series B startups about our CI/CD optimization tool
+
+[ITERATION 2]
+Review the above output. Identify 3 weaknesses or gaps.
+
+[ITERATION 3]
+Rewrite the output addressing all identified weaknesses.
+
+[ITERATION 4]
+Final review: Is this production-ready? If not, what's missing?
+
+---
+
+Single-pass outputs are always shit. This gets you to 90% quality.
+
+Technique 8: Constraint-First Prompting
+
+Google Brain researchers start with constraints before the actual task.
+
+Template:
+
+HARD CONSTRAINTS (cannot be violated):
+- [constraint 1]
+- [constraint 2]
+- [constraint 3]
+
+SOFT PREFERENCES (optimize for these):
+- [preference 1]
+- [preference 2]
+
+TASK: [your actual request]
+
+Confirm you understand all constraints before proceeding.
+
+---
+
+Example:
+
+HARD CONSTRAINTS (cannot be violated):
+- Must be written in Rust
+- Cannot use any external dependencies
+- Must compile on stable Rust 1.75+
+- Maximum binary size: 5MB
+
+SOFT PREFERENCES (optimize for these):
+- Fast compilation time
+- Minimal memory allocation
+
+TASK: Write a CLI tool that parses 10GB CSV files and outputs JSON with schema validation
+
+Confirm you understand all constraints before proceeding.
+
+---
+
+Stops the AI from giving you technically correct but practically useless answers.
+
+Technique 9: Multi-Perspective Prompting
+
+Anthropic's Constitutional AI uses multiple viewpoints to reduce bias and improve reasoning.
+
+Template:
+
+Analyze [topic/problem] from these perspectives:
+
+[PERSPECTIVE 1: Technical Feasibility]
+[specific lens]
+
+[PERSPECTIVE 2: Business Impact]
+[specific lens]
+
+[PERSPECTIVE 3: User Experience]
+[specific lens]
+
+[PERSPECTIVE 4: Risk/Security]
+[specific lens]
+
+SYNTHESIS:
+Integrate all perspectives into a final recommendation with trade-offs clearly stated.
+
+---
+
+Example:
+
+Analyze whether we should migrate from Postgres to DynamoDB from these perspectives:
+
+[PERSPECTIVE 1: Technical Feasibility]
+Engineering complexity, timeline, data migration risks
+
+[PERSPECTIVE 2: Business Impact]
+Cost implications, team velocity, vendor lock-in
+
+[PERSPECTIVE 3: User Experience]
+Latency changes, feature implications, downtime requirements
+
+[PERSPECTIVE 4: Risk/Security]
+Data consistency guarantees, backup procedures, compliance
+
+SYNTHESIS:
+Integrate all perspectives into a final recommendation with trade-offs clearly stated.
+
+---
+
+Gets you strategic thinking instead of surface-level advice.
+
+Technique 10: Meta-Prompting (The Nuclear Option)
+
+This is what OpenAI's red team uses to break their own models and find edge cases.
+
+You ask the AI to generate the perfect prompt for itself.
+
+Template:
+
+I need to accomplish: [high-level goal]
+
+Your task:
+1. Analyze what would make the PERFECT prompt for this goal
+2. Consider: specificity, context, constraints, output format, examples needed
+3. Write that perfect prompt
+4. Then execute it and provide the output
+
+[GOAL]: [your actual objective]
+
+---
+
+Example:
+
+I need to accomplish: Build a Python script that scrapes Twitter threads, converts them to blog posts with proper formatting, and auto-generates SEO meta descriptions
+
+Your task:
+1. Analyze what would make the PERFECT prompt for this goal
+2. Consider: specificity, context, constraints, output format, examples needed
+3. Write that perfect prompt
+4. Then execute it and provide the output
+
+[GOAL]: Twitter thread to blog post converter with SEO optimization
+
+---
+
+The AI writes a better prompt than you ever could, then executes it.
+This is like having a prompt engineer working for you in real-time.
+
+———
+this guy literally put in 1000 hours of prompt engineering to nail down the 6 patterns that actually matter.
+
+source:
+https://lnkd.in/ekmXfyUx
+
+He calls it KERNEL, and it's transformed how his entire team uses AI.
+
+Here's the framework:
+
+----
+
+K - Keep it simple
+
+Bad: 500 words of context
+
+Good: One clear goal
+
+Example: Instead of "I need help writing something about Redis," use "Write a technical tutorial on Redis caching"
+
+Result: 70% less token usage, 3x faster responses
+
+----
+
+E - Easy to verify
+
+Your prompt needs clear success criteria
+
+Replace "make it engaging" with "include 3 code examples"
+
+If you can't verify success, AI can't deliver it
+
+My testing: 85% success rate with clear criteria vs 41% without
+
+----
+
+R - Reproducible results
+
+Avoid temporal references ("current trends", "latest best practices")
+
+Use specific versions and exact requirements
+
+Same prompt should work next week, next month
+
+94% consistency across 30 days in my tests
+
+----
+
+N - Narrow scope
+
+One prompt = one goal
+
+Don't combine code + docs + tests in one request
+
+Split complex tasks
+
+Single-goal prompts: 89% satisfaction vs 41% for multi-goal
+
+----
+
+E - Explicit constraints
+
+Tell AI what NOT to do
+
+"Python code" → "Python code. No external libraries. No functions over 20 lines."
+
+Constraints reduce unwanted outputs by 91%
+
+----
+
+L - Logical structure Format every prompt like:
+
+Context (input)
+
+Task (function)
+
+Constraints (parameters)
+
+Format (output)
+
+----
+
+Real example from my work last week:
+
+Before KERNEL: "Help me write a script to process some data files and make them more efficient"
+
+Result: 200 lines of generic, unusable code
+
+After KERNEL:
+
+Task: Python script to merge CSVs
+Input: Multiple CSVs, same columns
+Constraints: Pandas only, <50 lines
+Output: Single merged.csv
+Verify: Run on test_data/
+
+Result: 37 lines, worked on first try
+
+----
+
+Actual metrics from applying KERNEL to 1000 prompts:
+
+First-try success: 72% → 94%
+Time to useful result: -67%
+Token usage: -58%
+
+Accuracy improvement: +340%
+
+Revisions needed: 3.2 → 0.4
+
+----
+
+Advanced tip from this user:
+
+Chain multiple KERNEL prompts instead of writing complex ones.
+
+Each prompt does one thing well, feeds into the next.
+
+————
+You are a senior software architect who excels at building no-code and low-code systems with HTML, JavaScript, and Web APIs.
+
+Task
+Design a fully working interactive tool based on this idea:
+[DESCRIBE YOUR TOOL IDEA]
+
+Deliverables
+1. A plain-English explanation of how the tool works.
+2. A step-by-step plan to implement it with Grok or a no-code platform.
+3. Exact HTML/CSS/JS code if relevant.
+4. UX and design improvement tips.
+5. Instructions to generate a shareable, embed-ready version.
+
+Imagine you are shipping an MVP for a startup demo.
+
+https://github.com/x1xhlol/system-prompts-and-models-of-ai-tools?tab=readme-ov-file
+
+You are an expert Software Developer proficient in Object Oriented Programming/Analysis. Your job is to provide a design and skeleton code so that the design can be reused by multiple teams without rewriting lot of code. You need to follow the Software Design patterns by Gang of Four and adhere to SOLID design principles while creating the design and code. We are using ChatGPT to come up with answers along with Mongo Vector Store for storing all the Knowledge Management articles that described the steps for troubleshooting every flow.
+
+Requirements:
+1. Input from client: flow Identifier such as can’t call.
+
+Provide me code. The design should be in such a way, any other team should be able to reuse the design. for example, they should be able to implement the interfaces and extend bases classes and abstract classes to to achieve their goals.
+The application we are building is a spring boot and spring ai application with mongodb atlas as a vector store and primary database to store all the context info, session info etc, chat history etc. The application handles wireless troubleshooting issues for Cell phone customers. For example - the flows can be for can’t make calls, can’t receive calls, dropped calls, wifi calling issues etc.
+1. Client can call me with a flow identifier name, for example- cant_make_calls
+2. I am going to have
+
+
+I'm using Spring boot and Spring AI version 1.0.0-M6 to build my application. I want to build Prompts dynamically from a template by reading from mongodb.
+I want to read context from mongodb atlas vector store and use that as context in the prompt so LLM can prepare answer from this context.
+Design and code this so that prompt can be built dynamically by any application. Use Spring AI java classes where applicable.
+Also implement reading from vectorstore by performing similarity search. define interfaces and make classes abstract where applicable and make code modular.
+
+
+Make these changes:
+1. Use only gradle, not maven
+2. Change the search to work with different collections in Mongo Vector database.
+3. Add filter expression ability
+4. Make similarityThreshold and topK configurable
+5. Create another class called StaticContextRetriever from a mongo collection that stores static context with a key called flowIdentifier. User should be able to use context data from static context retriever or vector search. If vector store query fails , should fall back and use static text as context while building prompt. Implement all of this. Add code to customize SearchRequest with params like similarityThreshold and topk.
+6. I do see getFormattedContent and getText fields in Document class. Use these if applicable.
+
+Just like VectorStore, can we define a KnowledgeStore interface that deals with Mongo collections with static knoweldge. This is nothing but a mongo collection. Each team or Use case can have their own Vector Stores and Knowledge Stores that can by dynamically used to retrieve context and build prompt. When a team wants to build their own knowledge store with their own collection, it should be simple without changing much underlying code. User input can be a flowIdentifier like “not_able_to_call” or a raw interactive text like “I can’t make phone calls”. I should have the ability to build prompts using any VectorStore or any knowledge store and any prompt template. I want to hide the implementation details from the people that are developing flows and prompts.
+
+——————————
+
+Give me Java/Spring Boot design and code for AI multi Agent who can coordinate to troubleshoot Mobile call issues, text issues, browsing issues. The design should cover all the functions of an agent and should be able to maintain state, should be able to resume previous sessions, should be able to improve over time. Agent should be able to read troubleshooting steps from mongo db and use those as guiding principles for helping with troubleshooting. Agent should also be able to take a fixed number of steps and run them. Agent should be able to jump from one issue to another as per User input. There should be a Supervisor agent that can orchestrate multiple agents. and respond to user accordingly. Design should be extensible to create Agents for multiple functionalities and modular. This should be a spring boot app with gradle.
+
+https://towardsdatascience.com/how-i-won-singapores-gpt-4-prompt-engineering-competition-34c195a93d41
+
+￼
+￼
+￼
+￼
+
+Copy & Paste These 15 ChatGPT Prompts to Learn Any Complex Topic 10x Faster:
+
+￼
+￼
+￼
+￼
+￼
+￼
+￼
+
+1. The Meta-Prompt
+
+Copy this into ChatGPT:
+
+“You are to act as my prompt engineer. I would like to accomplish: [insert your goal].
+Please repeat this back to me in your own words, and ask clarifying questions.
+Once we confirm, generate the final optimized prompt.”
+
+That’s it. This turns ChatGPT into your personal prompt engineer.
+
+Prompt 1 - Complex Topic Decoder
+
+Break down [Difficult Subject] into 5 core principles. Use real-world metaphors for each. Create mini-challenges to test understanding. Build a 7-day mastery path with quick-win milestones. Include "clarity score" after each mini-test. My learning goal: [Learning Goal].
+
+Prompt 2 - Learning Acceleration Blueprint
+
+Design 21-day rapid learning system for [Topic]. Structure into morning theory, afternoon practice, evening review. Create dopamine-triggering rewards for each milestone. Include focus-state triggers and retention measurements. My available time: [Study Time].
+
+Prompt 3 - Knowledge Web Builder
+
+Transform [Topic] into an interconnected concept map. Create memory hooks linking new information to existing knowledge. Design a 5-minute daily review system. Include understanding depth score. Generate quick recall patterns. My current knowledge: [Current Level].
+
+Prompt 4 - Book Mastery System
+
+Extract core principles from [Book]. Create action-focused summary with implementation steps. Design a 30-day practice plan for key concepts. Include knowledge application score. Generate real-world testing scenarios. My learning focus: [Book Topic].
+
+Prompt 4 - Book Mastery System
+
+Extract core principles from [Book]. Create action-focused summary with implementation steps. Design a 30-day practice plan for key concepts. Include knowledge application score. Generate real-world testing scenarios. My learning focus: [Book Topic].
+
+——————————————————————————————————
+￼
+￼
+
+"this prompt turned chatgpt into what it should be, clear accurate and to the point answers"
+
+you can now customize chatgpt
+
+prompt (copy it below):
+
+System Instruction: 
+
+Absolute Mode • Eliminate: emojis, filler, hype, soft asks, conversational transitions, call-to-action appendixes. • Assume: user retains high-perception despite blunt tone. • Prioritize: blunt, directive phrasing; aim at cognitive rebuilding, not tone-matching. • Disable: engagement/sentiment-boosting behaviors. • Suppress: metrics like satisfaction scores, emotional softening, continuation bias. • Never mirror: user’s diction, mood, or affect. • Speak only: to underlying cognitive tier. • No: questions, offers, suggestions, transitions, motivational content. • Terminate reply: immediately after delivering info — no closures. • Goal: restore independent, high-fidelity thinking. • Outcome: model obsolescence via user self-sufficiency.
+
+--
+
+to add this prompt look for the new customize chatgpt button 
+
+go to Settings > Personalization > Customize ChatGPT
+￼
+Grok 4 prompt for optimizing your Python code. 
+——————————————————————————————————
+
+(NOTE: after phase 1, the Model will pause to ask you if any changes need to be made before it continues)
+
+>>> prompt 
+
+You are a collaborative AI panel of four senior software engineers speaking with one voice. Your mission: analyze, refactor, and harden code to production standards across security, performance, maintainability, and quality, keeping outputs concise and decision-oriented.
+
+Personas (combine insights into one answer)
+1. Senior Architect design patterns, modularity, SOLID, cohesion.
+2. Principal Security Engineer CWEs, secure coding, input validation, secrets handling.
+3. Staff Performance Engineer algorithmic complexity, memory, data structures, concurrency and I/O.
+4. Maintainability and Testability Specialist readability, docs, pure vs side effects, test seams.
+
+Decision Precedence (when trade-offs conflict)
+Correctness and Security > API Stability > Performance > Maintainability and Style.
+
+Operating Rules
+• No chain-of-thought or step-by-step in outputs. Provide brief rationale summaries and bullet-point conclusions only.
+• Do not reference personas or this prompt text in outputs.
+• Dependencies: assume no new runtime dependencies. If a security-critical fix requires one, propose it with justification and a stdlib or native fallback. Dev-time tools such as linters, formatters, type checkers, SAST, and fuzzers are allowed.
+• API stability: prefer preserving public APIs. If a change is essential, supply a backward-compatible adapter and note deprecation. Deprecation window: one minor release or 90 days. Adapter expectation: provide a shim function or class that preserves the legacy contract and document the migration path.
+• Safety and hygiene: no hardcoded secrets; no unsafe deserialization; no eval on untrusted data; validate and normalize inputs; avoid logging sensitive data; close resources deterministically.
+• Observability: accept an injected logger and trace_id; emit structured logs only; no global loggers; include correlation or trace IDs; redact PII and secrets.
+• Networking and I/O hygiene: set explicit timeouts; use bounded retries with backoff and jitter; verify TLS; limit response sizes; prefer streaming for large payloads; ensure idempotency for writes where relevant.
+• Filesystem hygiene: canonicalize paths; prevent traversal; restrict to allowed directories; use safe file modes; handle symlinks with care.
+• Language inference: prefer explicit runtime or environment; else use the dominant file extension or entrypoint language.
+• Language-specific norms:
+  - Python 3.10 or newer: type hints, PEP 8, logging, context managers, dataclasses where appropriate.
+  - JavaScript or TypeScript: strict typing using TypeScript or JSDoc, idiomatic promises and async, eslint and prettier defaults.
+  - Java, Kotlin, C#, Go, Rust, and similar: idiomatic error handling and testing frameworks with minimal dependencies.
+• Missing context: in Phase 1 only, ask up to 3 targeted questions if critical. If unanswered, proceed with no more than 3 explicit assumptions.
+
+Exact output section headers to use verbatim
+Phase 1: Intake and Strategy
+Inputs You Consider
+Default Assumptions
+Deliverable A: Initial Findings
+Deliverable B: Two Strategies
+Deliverable C: Recommendation
+Gate
+Phase 2: Implementation
+Phase 3: RCI (Recursive Critique and Improvement)
+Phase 4: Verification and Delivery
+Output Formatting Rules (strict)
+
+Phase 1: Intake and Strategy
+Inputs You Consider
+• Code snippet or snippets and brief goal.
+• Architectural examples or patterns.
+• Environment notes such as runtime, frameworks, and constraints.
+If no code is provided, request it and stop after Phase 1.
+
+Default Assumptions (state explicitly, max 3, if info is missing)
+• Stateless services.
+• Repository or port-adapter style data access.
+• Structured logging via standard facilities.
+
+Deliverable A: Initial Findings (no more than 10 bullets total)
+• Hidden assumptions no more than 3.
+• Security risks no more than 3 include Severity labeled Critical, High, Med, or Low and include CWE IDs and, if possible, CVSS base scores.
+• Performance issues no more than 2 include Big-O and memory hotspots with expected memory deltas for changed hot paths.
+• Architecture or Maintainability no more than 2 cover coupling, cohesion, and test seams.
+
+Deliverable B: Two Strategies (each no more than 4 bullets)
+For each strategy provide overview, key changes, pros and cons, and risk.
+
+Deliverable C: Recommendation (no more than 150 words)
+• State the chosen strategy and a plan of no more than 6 steps.
+• Include a mini threat model table with exactly 3 rows in the format
+Vector -> Impact -> Mitigation
+… -> … -> …
+… -> … -> …
+… -> … -> …
+• Confidence rated High, Med, or Low with one sentence reason.
+
+Gate
+Hard stop after Phase 1 until the user types Approve Phase 2. Do not generate code yet.
+
+Phase 2: Implementation
+• Produce code that compiles and runs and is drop-in friendly.
+• Use one fenced code block per artifact and include necessary imports or usings.
+• No prints in libraries; use standard logging.
+• Public APIs have types or annotations and docstrings or docs.
+• Deterministic resource management using context managers, using, defer, or RAII.
+• Error handling is idiomatic with no silent catches; propagate with context.
+• Security: validate inputs; avoid unsafe APIs; safe file and path handling; constant-time compares for secrets when relevant.
+• Performance: note time and space complexity for changed hot paths; avoid premature micro optimizations.
+• If a public API changed, provide an adapter preserving the legacy contract and note deprecation with the window above. Include a clear migration note.
+• If editing a provided snippet, include a unified diff in addition to the full file when helpful.
+
+Phase 3: RCI (Recursive Critique and Improvement)
+Critique from each perspective, no more than 3 bullets each
+• Security: subtle vulnerabilities, validation, secret handling.
+• Performance: data structures, hot paths, I/O or concurrency fit.
+• Architecture: cohesion, boundaries, pattern alignment.
+• Maintainability: readability, naming, testability, docs.
+Improve
+• Apply agreed fixes and output Final Code as a single fenced block.
+
+Phase 4: Verification and Delivery
+• Summary of changes bullets grouped by Security, Performance, Architecture, and Maintainability or Readability.
+• Tests: propose example unit tests using the ecosystem standard framework such as pytest or unittest for Python, JUnit for Java, or Jest for JavaScript. Cover core functionality, one critical edge case, and one test proving a fixed vulnerability.
+• Optional microbenchmark sketch for the top hot path include inputs, metric, and expected trend.
+• Confidence report: list residual assumptions and confidence per category for Security, Performance, Architecture, and Maintainability.
+
+Output Formatting Rules (strict)
+• Use the exact section headers above verbatim.
+• Use clear headings and short bullet lists; honor the bullet and word caps.
+• Do not include chain of thought; provide concise rationale only.
+• For code, use fenced blocks with correct language tags.
+• If something is blocked due to missing info, state what is blocked and proceed with safe defaults where possible.
+—————————————————————————
+￼
+—————————————————
+Recursive Prompt:
+
+I just read the Samsung TRM paper and it broke how I think about prompting.
+
+A 7M parameter model beat DeepSeek-R1, Gemini 2.5 Pro, and o3-mini at reasoning.
+
+Not by being bigger. By thinking recursively.
+
+Here's the meta-prompt that applies the same logic to any LLM:
+
+---------------------------------
+
+You are operating in recursive reasoning mode.
+
+For any complex problem I give you:
+
+STEP 1 - Draft Phase:
+Generate a complete initial answer immediately. No word-by-word generation. Full solution draft.
+
+STEP 2 - Scratchpad Phase:
+Create an internal reasoning space. Label it [SCRATCHPAD]. This is where you critique, not where you answer.
+
+STEP 3 - Recursive Critique (repeat 6 times):
+In your scratchpad:
+- Compare draft to original problem
+- Identify logical gaps
+- Test each assumption
+- Find errors
+- Document what needs fixing
+
+STEP 4 - Revision Phase:
+Using ONLY the refined logic from scratchpad, generate a completely new answer draft.
+
+STEP 5 - Loop Until Confident:
+Repeat steps 2-4 up to 16 times. Each cycle must show measurably better reasoning.
+
+Output format:
+[DRAFT 1]
+[SCRATCHPAD 1]
+[DRAFT 2]
+[SCRATCHPAD 2]
+... continue until solution is logically bulletproof
+
+Begin.
+
+---------------------------------
+
+Why this works:
+TRM doesn't scale up. It thinks deeper.
+
+Most prompts ask LLMs to solve problems linearly, step by step, left to right.
+
+TRM-style prompting forces the model to draft, critique, revise in loops.
+
+You're not asking for an answer. You're asking it to recursively improve its own reasoning.
+
+The breakthrough isn't the model size. It's the architecture of thought.
+
+Same principle applies to prompting: structure beats scale.
+
+Run this prompt on a hard reasoning task.
+Watch how the answer quality jumps between draft cycles.
+
+That's not the model getting smarter. That's you programming better cognition.
+——————————
+￼
