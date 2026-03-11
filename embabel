@@ -1,0 +1,90 @@
+https://medium.com/@springrod/embabel-year-end-update-building-the-best-agent-framework-25ed98728e79
+
+A2A protocol — each agent goal is exported with @Export(remote = true), auto-discoverable at /.well-known/agent.json
+
+How @Export(remote = true) Works on Sub-Agents
+In Embabel, @Export(remote = true) is placed on each agent's own @AchievesGoal, including sub-agents. The framework has three working examples that prove this:
+
+Agent	Is a Sub-Agent?	Has @Export(remote=true)?
+
+StarNewsFinder
+✅ Used by 
+
+Handoff
+ and 
+
+Subagents
+✅ Yes
+
+FactChecker
+✅ Can be used as subagent	✅ Yes
+
+BookWriter
+✅ Standalone	✅ Yes
+This gives you dual access: the sub-agent is callable both in-process (via Subagent.ofClass() from the supervisor) and remotely (via A2A from any external client).
+
+The implementation plan already has this correctly — each of the 4 agents (supervisor, mobility, broadband, education) exports its own goal. That's the established Embabel pattern.
+
+Now, regarding your more important question about multi-turn conversation and resolution — that's a fundamental design challenge. Let me address that directly since it affects the architecture significantly:
+
+Multi-Turn Resolution: How Embabel Handles It
+Embabel provides 3 patterns for this problem:
+
+Pattern 1: RepeatUntilAcceptable — Agent Self-Evaluates
+From 
+
+ReviseStoryUntilSatisfied.java
+:
+
+java
+RepeatUntilAcceptableBuilder
+    .returning(Story.class)
+    .withMaxIterations(7)            // Safety cap
+    .withScoreThreshold(.8)          // Score > 0.8 = done
+    .repeating(context -> { ... })   // Generate attempt
+    .withEvaluator(context -> { ...})// LLM scores it
+    .build()
+For your use case: The agent could loop — try a fix, ask the LLM "did we likely resolve it?", and repeat. But this doesn't involve the customer confirming.
+
+Pattern 2: WaitFor.formSubmission() — Human-in-the-Loop
+From 
+
+Handoff.java
+:
+
+java
+return WaitFor.formSubmission("Is your issue resolved?", ResolutionFeedback.class);
+For your use case: After each troubleshooting step, the agent pauses and asks the customer "Did that fix it?" The customer's response drives the next action.
+
+Pattern 3: @Condition + 
+
+pre
+/post — Conditional Branching
+From 
+
+Researcher.kt
+:
+
+kotlin
+@Condition(name = REPORT_SATISFACTORY)
+fun makesTheGrade(critique: Critique) = critique.accepted
+@Condition(name = REPORT_UNSATISFACTORY)
+fun rejected(critique: Critique) = !critique.accepted
+Actions then use pre = [REPORT_UNSATISFACTORY] to only run when the condition is met — creating conditional loops.
+
+What This Means for Your Chatbot
+For a customer troubleshooting chatbot, you'd combine Pattern 2 + Pattern 3:
+
+Customer: "My WiFi keeps dropping"
+    → Supervisor classifies → BroadbandAgent
+    → BroadbandAgent: "Try restarting your router. Did that fix it?"
+    → WaitFor customer response
+    → Customer: "No, still dropping"
+    → @Condition(ISSUE_UNRESOLVED) → next troubleshooting step
+    → BroadbandAgent: "Check for firmware updates. Did that help?"
+    → WaitFor customer response
+    → Customer: "Yes! It's working now"
+    → @Condition(ISSUE_RESOLVED) → @AchievesGoal
+The key insight: only the customer can confirm resolution, and WaitFor.formSubmission() is exactly how Embabel handles that pause-and-wait.
+
+Would you like me to update the implementation plan to include this multi-turn conversation flow with the HITL loop pattern?
