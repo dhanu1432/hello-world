@@ -1,3 +1,90 @@
+I query a troubleshooting guide and use that to provide one troubleshooting step at a time. can that be tracked as an asset? I give this guide as part of prompt to LLM. what is the differnce between t...
+Show full text
+Fast
+View as codemap
+Yes, your troubleshooting guide can absolutely be tracked as an asset in Embabel. The key difference between treating it as an asset vs sending via prompt lies in persistence, reusability, and how the LLM can interact with it.
+
+Asset vs Prompt: Key Differences
+As an Asset
+Tracked across the conversation - persists between messages Asset.kt:24-28
+Available as LLM tools - can be queried and referenced AssetView.kt:31-36
+Managed by AssetTracker - can be filtered, retrieved, and organized AssetTracker.kt:28-44
+Deduplicated by ID - avoids duplicates across messages Conversation.kt:41-55
+As Prompt Content
+Ephemeral - only available for that specific LLM call
+Not tracked - disappears after the interaction
+Directly included - part of the prompt text itself
+No tool access - LLM can't query or reference it later
+Implementation Examples
+1. Tracking as an Asset
+// Create the troubleshooting guide as an asset  
+Asset guideAsset = new TroubleshootingGuideAsset(  
+    id = "wifi-troubleshooting-guide",  
+    steps = listOf(  
+        "Check if WiFi is enabled",  
+        "Restart router",   
+        "Update drivers",  
+        "Contact ISP"  
+    )  
+);  
+  
+// Add to conversation tracker for persistence  
+conversation.getAssetTracker().addAsset(guideAsset);  
+  
+// LLM can access it as a tool in subsequent messages  
+var response = context.ai()  
+    .withReferences(conversation.mostRecent(5).references())  
+    .respond("What's the first troubleshooting step?");
+2. Sending via Prompt
+// Include directly in prompt (not tracked)  
+var response = context.ai()  
+    .withSystemPrompt("""  
+        You are a troubleshooting assistant.   
+        Use this guide: Check WiFi → Restart router → Update drivers → Contact ISP  
+        Provide one step at a time.  
+    """)  
+    .respond("My WiFi isn't working");
+Recommended Approach for Your Use Case
+For providing troubleshooting steps one at a time, use an asset because:
+
+State tracking - You can track which steps have been completed
+Tool access - LLM can query specific steps or check progress
+Persistence - Guide remains available across multiple troubleshooting sessions
+Structured access - Better than parsing prompt text
+@State  
+record TroubleshootingState(  
+    String guideId,  
+    int currentStep,  
+    List<String> completedSteps  
+) implements Stage { ... }  
+  
+@Action(canRerun = true, trigger = UserMessage.class)  
+void provideNextStep(Conversation conversation, ActionContext context) {  
+    // Get the guide asset  
+    TroubleshootingGuide guide = conversation.getAssetTracker()  
+        .getAsset("wifi-troubleshooting-guide")  
+        .orElseThrow();  
+      
+    // Get current state  
+    TroubleshootingState state = getCurrentState(conversation);  
+      
+    // Provide next step  
+    String nextStep = guide.getSteps().get(state.currentStep);  
+      
+    var response = new AssistantMessage(  
+        "Step " + (state.currentStep + 1) + ": " + nextStep,  
+        null, null,  
+        List.of(guide) // Include guide as asset for reference  
+    );  
+      
+    conversation.addMessage(response);  
+}
+Notes
+Assets are ideal for structured content like guides that need to be referenced multiple times page.adoc:111-120
+Use prompt content for simple, one-time instructions
+Assets can be made persistent or ephemeral based on your needs Asset.kt:25-27
+The Asset.asAsset() utility method can convert any LlmReferenceProvider to an Asset Asset.kt:32-39
+---------------------------------------------------
 what exactly is the meaning of Asset and Asset tracker in embabel, give examples
 Fast
 View as codemap
